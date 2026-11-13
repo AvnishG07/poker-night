@@ -94,6 +94,8 @@
     if (!fb.apps.length) fb.initializeApp(cfg);
     const auth = fb.auth();
     const fs = fb.firestore();
+    // Safari / mobile networks: long-polling keeps live updates flowing reliably.
+    try { fs.settings({ experimentalForceLongPolling: true, merge: true }); } catch (e) {}
     const user = await new Promise((resolve, reject) => {
       const off = auth.onAuthStateChanged((u) => {
         if (u) { off(); resolve(u); }

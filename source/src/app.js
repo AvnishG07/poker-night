@@ -399,7 +399,11 @@
       }
       render();
     }, onErr));
-    S.unsub.push(S.store.onDoc('sessions/' + sid + '/live/hand', (d) => {
+    S.unsub.push(S.store.onDoc('sessions/' + sid + '/live/hand', onHand, onErr));
+    S.unsub.push(S.store.onQuery('sessions/' + sid + '/hands', { orderBy: 'no', dir: 'desc', limit: 60 }, (rows) => { S.history = rows; render(); }, onErr));
+    S.unsub.push(S.store.onQuery('sessions/' + sid + '/chat', { orderBy: 'ts', dir: 'desc', limit: 50 }, (rows) => { S.chat = rows.reverse(); render(); }, onErr));
+  }
+  function onHand(d) {
       const wasMyTurn = S.hand && S.hand.toAct === S.me.id && S.hand.status === 'betting';
       S.hand = d;
       const myTurn = d && d.toAct === S.me.id && d.status === 'betting';
@@ -412,10 +416,26 @@
         S.applyTimer = setTimeout(() => run(() => applyResult(d)), 2500);
       }
       render();
-    }, onErr));
-    S.unsub.push(S.store.onQuery('sessions/' + sid + '/hands', { orderBy: 'no', dir: 'desc', limit: 60 }, (rows) => { S.history = rows; render(); }, onErr));
-    S.unsub.push(S.store.onQuery('sessions/' + sid + '/chat', { orderBy: 'ts', dir: 'desc', limit: 50 }, (rows) => { S.chat = rows.reverse(); render(); }, onErr));
   }
+  // Safety net: if live updates stall (Safari, weak network), check the table every few seconds.
+  async function pollTable() {
+    if (!S.sid || document.hidden || !S.store || S.store.kind !== 'firebase') return;
+    try {
+      const d = await S.store.get(handPath());
+      if (d && (!S.hand || d.no !== S.hand.no || d.v !== S.hand.v || d.status !== S.hand.status)) onHand(d);
+    } catch (e) {}
+  }
+  setInterval(pollTable, 6000);
+  async function refreshAll() {
+    if (!S.sid || !S.store || S.store.kind !== 'firebase') return;
+    try {
+      const sd = await S.store.get(sessPath()); if (sd) { S.session = sd; render(); }
+    } catch (e) {}
+    pollTable();
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshAll(); });
+  window.addEventListener('online', refreshAll);
+  window.addEventListener('pageshow', refreshAll);
   function onErr(e) {
     console.warn('store error', e);
     S.connErr = (e && (e.code || e.message)) || 'error';
