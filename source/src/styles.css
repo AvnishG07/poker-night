@@ -109,3 +109,7 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
 .result .w{font-size:18px;font-weight:800;color:var(--gold)}
 .empty{text-align:center;color:var(--mute);padding:24px 8px}
 .pill{display:inline-block;padding:3px 8px;border-radius:20px;background:var(--felt3);font-size:12px;margin:2px}
+
+.rivercol{display:flex;flex-direction:column;gap:4px;margin-left:4px}
+.pc.side{width:66px;height:46px;flex-direction:row;gap:4px}
+.pc.side.sm{width:42px;height:30px;gap:2px}

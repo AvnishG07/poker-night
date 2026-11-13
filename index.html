@@ -129,6 +129,10 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
 .empty{text-align:center;color:var(--mute);padding:24px 8px}
 .pill{display:inline-block;padding:3px 8px;border-radius:20px;background:var(--felt3);font-size:12px;margin:2px}
 
+.rivercol{display:flex;flex-direction:column;gap:4px;margin-left:4px}
+.pc.side{width:66px;height:46px;flex-direction:row;gap:4px}
+.pc.side.sm{width:42px;height:30px;gap:2px}
+
 .top{padding-top:calc(12px + env(safe-area-inset-top))}</style></head>
 <body><div id="app"></div>
 <script>/* ============================================================
@@ -303,13 +307,14 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
       const stack = opts.stacks[p] || 0;
       const cap = opts.game === 'allin' && opts.caps && opts.caps[p] > 0 ? Math.min(stack, opts.caps[p]) : stack;
       behind[p] = cap; start[p] = cap; contrib[p] = 0; roundBet[p] = 0;
+      if (cap < stack) (opts._capped = opts._capped || {})[p] = true;
     }
     const h = {
       no: opts.no, game: opts.game, mode: opts.mode, seats, dealer: opts.dealer,
       limits: opts.game === 'limit' ? limitsFor(opts.limitStructure, opts.lastLimit) : null,
       start, behind, contrib, roundBet, folded, allin, acted,
       street: 0, currentBet: 0, board: [], status: 'betting', toAct: null,
-      log: [], undo: null, lastActor: null, v: 1, ts: Date.now(),
+      log: [], undo: null, lastActor: null, v: 1, ts: Date.now(), capped: opts._capped || {},
     };
     // Dabba: dealer puts 100 into the pot (dead money, nobody has to match it).
     const d = Math.min(DABBA, h.behind[opts.dealer]);
@@ -533,6 +538,36 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
     return h;
   }
 
+  /**
+   * Chips given or lent while a hand is running.
+   * delta > 0: player receives chips — usable in this hand if they're still playing
+   *            (not folded, not all-in, not capped by their all-in limit).
+   * delta < 0: player gives chips — taken from chips outside the hand first,
+   *            then from their unbet chips in the hand.
+   * sessionStack = the player's total chips before this change.
+   * Returns a new hand, or null if the hand doesn't need to change.
+   */
+  function adjustInHand(hand, p, delta, sessionStack) {
+    if (!hand || hand.status === 'done' || !hand.seats.includes(p) || !delta) return null;
+    const h = clone(hand);
+    if (delta > 0) {
+      if (h.folded[p] || h.allin[p] || (h.capped && h.capped[p])) return null;
+      h.behind[p] += delta; h.start[p] += delta;
+    } else {
+      const amt = -delta;
+      const locked = h.folded[p] ? h.contrib[p] : h.start[p];
+      const free = sessionStack - locked;
+      if (amt <= free) return null;
+      if (h.folded[p] || h.allin[p]) throw new Error('Only ' + Math.max(0, free) + ' is free — the rest is in the pot');
+      const need = amt - free;
+      if (need >= h.behind[p]) throw new Error('Not enough free chips — the rest is in this hand');
+      h.behind[p] -= need; h.start[p] -= need;
+    }
+    h.undo = null; h.lastActor = null;
+    h.v = (hand.v || 0) + 1;
+    return h;
+  }
+
   function myHole(h, p) {
     if (h.mode !== 'online' || !h.secret) return null;
     const s = unseal(h.secret, h.key);
@@ -602,7 +637,7 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
   const Engine = {
     RANKS, CHIPS, STREETS, GAMES, DABBA, limitsFor,
     newDeck, shuffle, eval5, bestHand, cmp, chipBreakdown, buildPots, splitPot,
-    startHand, options, act, canChange, changeBet, resolveShowdown, resume, myHole, seal, unseal, potTotal,
+    startHand, adjustInHand, options, act, canChange, changeBet, resolveShowdown, resume, myHole, seal, unseal, potTotal,
     liveList, canActList, ledger, settleUp, openLoans, pickBank,
   };
   root.PokerEngine = Engine;
@@ -841,6 +876,16 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
     const red = c[1] === 'h' || c[1] === 'd';
     return `<div class="pc ${red ? 'red' : ''} ${cls}"><span class="r">${r}</span><span class="s">${s}</span></div>`;
   }
+  // Limit game: the 2 river cards lie sideways, stacked across the end of the row.
+  function boardHTML(cards, game, size, slots) {
+    const g = E.GAMES[game];
+    const total = g.board.reduce((a, b) => a + b, 0);
+    const list = slots ? Array.from({ length: total }, (_, i) => cards[i]) : cards.slice();
+    if (game !== 'limit') return list.map((c) => cardHTML(c, size)).join('');
+    const main = list.slice(0, 4), river = list.slice(4, 6);
+    return main.map((c) => cardHTML(c, size)).join('') +
+      (river.length ? `<div class="rivercol">${river.map((c) => cardHTML(c, 'side ' + size)).join('')}</div>` : '');
+  }
   function chipStack(amount) {
     const b = E.chipBreakdown(amount);
     const col = { 10: '#f2f2f2', 20: '#e2524a', 40: '#2f7dd1', 100: '#1d1d1d' };
@@ -933,14 +978,25 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
       if (list.length < 2) throw new Error('Add at least 2 players first');
       chosen = E.pickBank(list, cfg.lastBankId);
       s.bankId = chosen;
+      if (!s.firstDealer) s.firstDealer = list[Math.floor(Math.random() * list.length)];
       logEntry(s, { t: 'bank', p: chosen });
     });
     await mutate('config/main', (c) => ({ ...(c || {}), lastBankId: chosen }));
     toast(nm(chosen) + ' is the bank tonight 🏦');
   }
   function noHandCheck() { if (handLive()) throw new Error('Wait until this hand is over'); }
+  // Chips can move at any time; if a hand is running, the player's chips in the hand are updated too.
+  async function syncHand(from, to, amt, fromStackBefore) {
+    if (!handLive()) return;
+    await mutate(handPath(), (h) => {
+      if (!h || h.status === 'done') return false;
+      let x = h, changed = false;
+      if (from) { const r = E.adjustInHand(x, from, -amt, fromStackBefore); if (r) { x = r; changed = true; } }
+      if (to) { const r = E.adjustInHand(x, to, amt, 0); if (r) { x = r; changed = true; } }
+      return changed ? x : false;
+    });
+  }
   async function giveChips(pid, amt) {
-    noHandCheck();
     amt = Math.round(amt);
     if (!(amt > 0)) throw new Error('Pick an amount');
     await mutateSession((s) => {
@@ -948,25 +1004,60 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
       s.issued[pid] = (s.issued[pid] || 0) + amt;
       logEntry(s, { t: 'issue', p: pid, a: amt });
     });
+    await syncHand(null, pid, amt, 0);
     toast('Bank gave ' + rs(amt) + ' to ' + nm(pid));
   }
   async function lend(from, to, amt, kind) {
-    noHandCheck();
     amt = Math.round(amt);
     if (!(amt > 0)) throw new Error('Pick an amount');
+    let before = null;
+    if (handLive()) {
+      const h = await S.store.get(handPath());
+      if (h && h.status !== 'done') E.adjustInHand(h, from, -amt, S.session.stacks[from] || 0); // throws if not enough free chips
+    }
     await mutateSession((s) => {
+      before = s.stacks[from] || 0;
       if ((s.stacks[from] || 0) < amt) throw new Error(nm(from) + ' has only ' + rs(s.stacks[from] || 0));
       s.stacks[from] -= amt;
       s.stacks[to] = (s.stacks[to] || 0) + amt;
       s.loans.push({ from, to, amt, ts: Date.now(), kind: kind || 'loan' });
       logEntry(s, { t: kind || 'loan', from, to, a: amt });
     });
+    await syncHand(from, to, amt, before);
     toast((kind === 'repay' ? 'Repaid ' : 'Lent ') + rs(amt));
   }
-  async function setCap(v) {
+  // All-in game: everyone sets their limit for the NEXT hand before it can be dealt.
+  async function setCap(v, pid) {
+    pid = pid || S.me.id;
     const n = Math.max(0, Math.round(Number(v) || 0));
-    await mutateSession((s) => { s.caps = s.caps || {}; s.caps[S.me.id] = n; });
-    toast(n ? 'Your all-in limit: ' + rs(n) : 'All-in limit removed');
+    await mutateSession((s) => {
+      const N = (s.handNo || 0) + 1;
+      if (!s.capRound || s.capRound.no !== N) s.capRound = { no: N, caps: {} };
+      s.capRound.caps[pid] = n;
+      s.caps = s.caps || {}; s.caps[pid] = n;
+    });
+    toast(n ? 'All-in limit set: ' + rs(n) : 'No limit set');
+  }
+  function seatsFor(s) {
+    return s.order.filter((p) => s.players[p] && !s.players[p].out && !s.players[p].left && (s.stacks[p] || 0) > 0);
+  }
+  function nextDealer(s) {
+    const seats = seatsFor(s);
+    if (!seats.length) return null;
+    if (!s.lastDealer || s.order.indexOf(s.lastDealer) < 0) return s.firstDealer && seats.includes(s.firstDealer) ? s.firstDealer : null;
+    const i = s.order.indexOf(s.lastDealer);
+    for (let k = 1; k <= s.order.length; k++) { const p = s.order[(i + k) % s.order.length]; if (seats.includes(p)) return p; }
+    return null;
+  }
+  function capsPending(s) {
+    const N = (s.handNo || 0) + 1;
+    const got = s.capRound && s.capRound.no === N ? s.capRound.caps : {};
+    return seatsFor(s).filter((p) => !(p in got) && !s.players[p].offline);
+  }
+  function canChooseGame() {
+    const s = S.session;
+    const d = nextDealer(s);
+    return isAdmin() || (d && d === S.me.id);
   }
   async function saveSettings(patch) {
     await mutateSession((s) => { s.settings = { ...s.settings, ...patch }; });
@@ -979,18 +1070,20 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
     let hand;
     await mutateSession((s) => {
       if ((s.appliedHand || 0) < (s.handNo || 0)) throw new Error('Last hand is still being settled — wait a second');
-      const seats = s.order.filter((p) => s.players[p] && !s.players[p].out && !s.players[p].left && (s.stacks[p] || 0) > 0);
+      const seats = seatsFor(s);
       if (seats.length < 2) throw new Error('Need at least 2 players with chips (bank gives chips in Players)');
-      let dealer;
-      if (!s.lastDealer || s.order.indexOf(s.lastDealer) < 0) dealer = seats[Math.floor(Math.random() * seats.length)];
-      else {
-        const i = s.order.indexOf(s.lastDealer);
-        for (let k = 1; k <= s.order.length; k++) { const p = s.order[(i + k) % s.order.length]; if (seats.includes(p)) { dealer = p; break; } }
-      }
+      const dealer = nextDealer(s) || seats[Math.floor(Math.random() * seats.length)];
       const st = s.settings;
+      const N = (s.handNo || 0) + 1;
+      let caps = {};
+      if (st.game === 'allin') {
+        const waiting = capsPending(s);
+        if (waiting.length) throw new Error('Waiting for all-in limits from: ' + waiting.map((p) => s.players[p].name).join(', '));
+        caps = (s.capRound && s.capRound.no === N && s.capRound.caps) || {};
+      }
       hand = E.startHand({
-        no: (s.handNo || 0) + 1, game: st.game, mode: st.mode, seats, dealer,
-        stacks: s.stacks, caps: s.caps || {}, limitStructure: st.limitStructure, lastLimit: st.lastLimit,
+        no: N, game: st.game, mode: st.mode, seats, dealer,
+        stacks: s.stacks, caps, limitStructure: st.limitStructure, lastLimit: st.lastLimit,
       });
       s.handNo = hand.no; s.lastDealer = dealer;
     });
@@ -1317,10 +1410,9 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
     const street = h.status === 'showdown' || h.status === 'reveal' ? 'Showdown' : E.STREETS[h.street];
     const limit = h.limits ? ` · limit <b>${rs(h.limits[h.street] || 0)}</b>/round` : '';
     // Board
-    const nBoard = g.board.reduce((a, b) => a + b, 0);
     let board = '';
     if (h.mode === 'online') {
-      for (let i = 0; i < nBoard; i++) board += cardHTML(h.board[i]);
+      board = boardHTML(h.board, h.game, '', true);
     } else {
       const say = h.status === 'showdown' ? 'Show your cards!' : ['Deal ' + g.hole + ' cards to each player', 'Deal the flop (3 cards)', 'Deal the turn (1 card)', 'Deal the river (' + g.board[3] + ' card' + (g.board[3] > 1 ? 's' : '') + ')'][h.street];
       board = `<div class="mute" style="text-align:center">🃏 Physical cards<br><b style="color:var(--ink)">${say}</b></div>`;
@@ -1426,7 +1518,7 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
       shown = `<div class="seats" style="margin-top:10px">` + Object.entries(h.shown).map(([p, v]) => `<div class="seat"><div class="grow"><div class="nm">${esc(nm(p))}</div><div class="meta">${esc(v.name)}</div></div><div class="row" style="gap:3px">${v.cards.map((c) => cardHTML(c, 'sm' + (v.best.includes(c) ? ' hl' : ''))).join('')}</div></div>`).join('') + `</div>`;
     }
     return `<div class="felt result"><div class="hinfo"><span>Hand #${h.no} result</span><span>${res.how === 'fold' ? 'Others folded' : 'Showdown'}</span></div>
-      ${h.board && h.board.length ? `<div class="board">${h.board.map((c) => cardHTML(c)).join('')}</div>` : '<div style="height:8px"></div>'}
+      ${h.board && h.board.length ? `<div class="board">${boardHTML(h.board, h.game, '')}</div>` : '<div style="height:8px"></div>'}
       ${winners.map(([p, d]) => `<div class="w">🏆 ${esc(nm(p))} wins ${rs(res.payout[p])} <span class="small mute">(${sgn(d)})</span></div>`).join('')}
       ${shown}</div>`;
   }
@@ -1434,25 +1526,39 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
   function setupCard() {
     const s = S.session, st = s.settings;
     let h = '';
-    if (isAdmin()) {
-      h += `<div class="card"><h3>Next hand</h3>
+    const dealerNext = nextDealer(s);
+    const dName = dealerNext ? esc(nm(dealerNext)) : 'the dealer';
+    if (canChooseGame()) {
+      h += `<div class="card"><h3>Next hand${dealerNext ? ' · dealer ' + dName : ''}</h3>
+        ${dealerNext === S.me.id ? '<div class="small" style="color:var(--gold);margin-bottom:6px">You\'re the dealer — choose the game.</div>' : ''}
         <label class="lb">Game</label>
         <div class="seg">${segBtn('game', 'allin', "All-in Hold'em", st.game)}${segBtn('game', 'limit', 'Limit · 3 cards', st.game)}</div>
         ${st.game === 'limit' ? `<label class="lb">Round limits (pre-flop / flop / turn / river)</label>
           <div class="seg">${segBtn('limitStructure', 'flat', '100·100·100·' + st.lastLimit, st.limitStructure)}${segBtn('limitStructure', 'rising', '100·200·300·400', st.limitStructure)}</div>
           ${st.limitStructure === 'flat' ? `<div class="seg" style="margin-top:6px">${segBtn('lastLimit', 300, 'Last round ₹300', st.lastLimit)}${segBtn('lastLimit', 400, 'Last round ₹400', st.lastLimit)}</div>` : ''}` : ''}
         <div class="small mute" style="margin:10px 0">Tonight: <b style="color:var(--ink)">${st.mode === 'online' ? 'online cards' : 'real cards'}</b>. Dealer puts ${rs(E.DABBA)} dabba. Dealer moves one seat each hand.</div>
-        <button class="btn gold full" data-act="deal">Deal hand #${(s.handNo || 0) + 1}</button></div>`;
+        ${st.game === 'allin' && capsPending(s).length ? `<button class="btn full" disabled>Waiting for limits: ${esc(capsPending(s).map((p) => nm(p)).join(', '))}</button>` : `<button class="btn gold full" data-act="deal">Deal hand #${(s.handNo || 0) + 1}</button>`}</div>`;
     } else {
-      h += `<div class="card empty">Waiting for the host to deal the next hand<br><span class="small">${esc(E.GAMES[st.game].label)} · ${st.mode === 'online' ? 'online cards' : 'real cards'}</span></div>`;
+      h += `<div class="card empty">Waiting for <b style="color:var(--ink)">${dName}</b> (dealer) to choose and deal<br><span class="small">${esc(E.GAMES[st.game].label)} · ${st.mode === 'online' ? 'online cards' : 'real cards'}</span></div>`;
     }
-    if (isPlayer() && st.game === 'allin') {
-      const cap = (s.caps || {})[S.me.id] || 0;
-      h += `<div class="card"><h3>My all-in limit</h3>
-        <div class="small mute">Most you'll risk in one hand. You have ${rs(s.stacks[S.me.id] || 0)}. Leave 0 for no limit.</div>
-        <div class="row" style="margin-top:8px"><input class="in grow" type="number" inputmode="numeric" step="10" min="0" data-bind="cap" value="${esc(S.ui.cap != null ? S.ui.cap : cap)}">
-        <button class="btn" data-act="setCap">Save</button></div>
-        ${cap ? `<div class="small" style="margin-top:6px">Current: <b>${rs(cap)}</b></div>` : ''}</div>`;
+    if (st.game === 'allin') {
+      const N = (s.handNo || 0) + 1;
+      const got = s.capRound && s.capRound.no === N ? s.capRound.caps : {};
+      if (isPlayer() && seatsFor(s).includes(S.me.id)) {
+        const mine = got[S.me.id];
+        const last = (s.caps || {})[S.me.id] || 0;
+        h += `<div class="card" style="${mine === undefined ? 'border-color:var(--gold)' : ''}"><h3>My all-in limit · hand #${N}</h3>
+          ${mine === undefined ? `<div class="small" style="color:var(--gold)">Set your limit — the hand can't start until everyone has.</div>` : `<div class="small">Set: <b>${mine ? rs(mine) : 'No limit'}</b> — you can still change it.</div>`}
+          <div class="small mute" style="margin-top:4px">You have ${rs(s.stacks[S.me.id] || 0)}. This is the most you'll risk this hand.</div>
+          <div class="row" style="margin-top:8px"><input class="in grow" type="number" inputmode="numeric" step="10" min="0" placeholder="e.g. 2000" data-bind="cap" value="${esc(S.ui.cap != null ? S.ui.cap : (mine || ''))}">
+          <button class="btn gold" data-act="setCap">Set</button></div>
+          <div class="row" style="margin-top:6px"><button class="btn sm grow" data-act="capNone">No limit</button>${last ? `<button class="btn sm grow" data-act="capSame" data-v="${last}">Same as last (${rs(last)})</button>` : ''}</div></div>`;
+      }
+      const list = seatsFor(s);
+      if (list.length) h += `<div class="card"><h3>Limits for hand #${N}</h3><div class="list">${list.map((p) => {
+        const v = got[p]; const off = s.players[p].offline;
+        return `<div class="li small"><div class="grow">${esc(nm(p))}</div><div>${v === undefined ? (off ? '<span class="mute">No limit (offline)</span>' : '<span style="color:var(--gold)">⏳ waiting</span>') : (v ? '<b>' + rs(v) + '</b>' : 'No limit')}</div></div>`;
+      }).join('')}</div></div>`;
     }
     return h;
   }
@@ -1520,7 +1626,7 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
       return `<div class="li" style="flex-wrap:wrap"><div class="grow"><div><b>#${r.no}</b> <span class="small mute">${esc(E.GAMES[r.game].short)} · ${r.how === 'fold' ? 'won uncontested' : 'showdown'}</span></div>
         <div class="small">${ws.map(([p, d]) => `🏆 ${esc(name(p))} <span class="pos">${sgn(d)}</span>`).join(' · ')}</div>
         <div class="small mute">${Object.entries(r.delta).filter(([, d]) => d < 0).map(([p, d]) => `${esc(name(p))} <span class="neg">${sgn(d)}</span>`).join(' · ')}</div></div>
-        ${r.board && r.board.length ? `<div class="row" style="gap:2px">${r.board.map((c) => cardHTML(c, 'sm')).join('')}</div>` : ''}</div>`;
+        ${r.board && r.board.length ? `<div class="row" style="gap:2px">${boardHTML(r.board, r.game, 'sm')}</div>` : ''}</div>`;
     }).join('')}</div></div>`;
   }
 
@@ -1602,6 +1708,8 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
       case 'out': return run(() => toggleOut(v));
       case 'pickBank': return run(pickBank);
       case 'setCap': return run(async () => { await setCap(S.ui.cap); S.ui.cap = null; });
+      case 'capNone': return run(async () => { await setCap(0); S.ui.cap = null; });
+      case 'capSame': return run(async () => { await setCap(Number(v)); S.ui.cap = null; });
       case 'setting': if (el.dataset.k === 'mode') return; return run(() => saveSettings({ [el.dataset.k]: el.dataset.k === 'lastLimit' ? Number(v) : v }));
       case 'deal': return run(dealHand);
       case 'rz': {

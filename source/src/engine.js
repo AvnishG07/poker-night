@@ -170,13 +170,14 @@
       const stack = opts.stacks[p] || 0;
       const cap = opts.game === 'allin' && opts.caps && opts.caps[p] > 0 ? Math.min(stack, opts.caps[p]) : stack;
       behind[p] = cap; start[p] = cap; contrib[p] = 0; roundBet[p] = 0;
+      if (cap < stack) (opts._capped = opts._capped || {})[p] = true;
     }
     const h = {
       no: opts.no, game: opts.game, mode: opts.mode, seats, dealer: opts.dealer,
       limits: opts.game === 'limit' ? limitsFor(opts.limitStructure, opts.lastLimit) : null,
       start, behind, contrib, roundBet, folded, allin, acted,
       street: 0, currentBet: 0, board: [], status: 'betting', toAct: null,
-      log: [], undo: null, lastActor: null, v: 1, ts: Date.now(),
+      log: [], undo: null, lastActor: null, v: 1, ts: Date.now(), capped: opts._capped || {},
     };
     // Dabba: dealer puts 100 into the pot (dead money, nobody has to match it).
     const d = Math.min(DABBA, h.behind[opts.dealer]);
@@ -400,6 +401,36 @@
     return h;
   }
 
+  /**
+   * Chips given or lent while a hand is running.
+   * delta > 0: player receives chips — usable in this hand if they're still playing
+   *            (not folded, not all-in, not capped by their all-in limit).
+   * delta < 0: player gives chips — taken from chips outside the hand first,
+   *            then from their unbet chips in the hand.
+   * sessionStack = the player's total chips before this change.
+   * Returns a new hand, or null if the hand doesn't need to change.
+   */
+  function adjustInHand(hand, p, delta, sessionStack) {
+    if (!hand || hand.status === 'done' || !hand.seats.includes(p) || !delta) return null;
+    const h = clone(hand);
+    if (delta > 0) {
+      if (h.folded[p] || h.allin[p] || (h.capped && h.capped[p])) return null;
+      h.behind[p] += delta; h.start[p] += delta;
+    } else {
+      const amt = -delta;
+      const locked = h.folded[p] ? h.contrib[p] : h.start[p];
+      const free = sessionStack - locked;
+      if (amt <= free) return null;
+      if (h.folded[p] || h.allin[p]) throw new Error('Only ' + Math.max(0, free) + ' is free — the rest is in the pot');
+      const need = amt - free;
+      if (need >= h.behind[p]) throw new Error('Not enough free chips — the rest is in this hand');
+      h.behind[p] -= need; h.start[p] -= need;
+    }
+    h.undo = null; h.lastActor = null;
+    h.v = (hand.v || 0) + 1;
+    return h;
+  }
+
   function myHole(h, p) {
     if (h.mode !== 'online' || !h.secret) return null;
     const s = unseal(h.secret, h.key);
@@ -469,7 +500,7 @@
   const Engine = {
     RANKS, CHIPS, STREETS, GAMES, DABBA, limitsFor,
     newDeck, shuffle, eval5, bestHand, cmp, chipBreakdown, buildPots, splitPot,
-    startHand, options, act, canChange, changeBet, resolveShowdown, resume, myHole, seal, unseal, potTotal,
+    startHand, adjustInHand, options, act, canChange, changeBet, resolveShowdown, resume, myHole, seal, unseal, potTotal,
     liveList, canActList, ledger, settleUp, openLoans, pickBank,
   };
   root.PokerEngine = Engine;

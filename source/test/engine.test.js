@@ -144,3 +144,18 @@ for (let t = 0; t < 2000; t++) {
 }
 n++;
 console.log('all', n, 'checks passed');
+
+// Chips during a hand
+{
+  let h = E.startHand({ no: 30, game: 'limit', mode: 'physical', seats: ['A', 'B'], dealer: 'A', stacks: { A: 300, B: 300 }, limitStructure: 'flat' });
+  let x = E.adjustInHand(h, 'B', 500, 0);
+  ok(x.behind.B === 800 && x.start.B === 800, 'receive mid-hand');
+  ok(E.adjustInHand(h, 'B', -100, 1300) === null, 'lend from outside chips');
+  x = E.adjustInHand(h, 'B', -200, 300);
+  ok(x.behind.B === 100, 'lend from unbet chips');
+  let threw = false; try { E.adjustInHand(h, 'B', -300, 300); } catch (e) { threw = true; }
+  ok(threw, 'cannot lend chips needed in hand');
+  const c = E.startHand({ no: 31, game: 'allin', mode: 'physical', seats: ['A', 'B'], dealer: 'A', stacks: { A: 3000, B: 300 }, caps: { A: 500 } });
+  ok(E.adjustInHand(c, 'A', 500, 0) === null, 'capped player: new chips stay outside the hand');
+}
+console.log('mid-hand checks ok');
