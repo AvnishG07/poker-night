@@ -107,6 +107,53 @@
     return { value: best, cards: bestCards, name };
   }
 
+  /** Best hand for a game. Limit (3-card) game: at most 2 of your own cards may be used. */
+  function bestFor(game, hole, board) {
+    const maxHole = game === 'limit' ? 2 : 5;
+    let best = null;
+    const choose = (arr, k) => {
+      const out = [];
+      (function rec(st, pick) { if (pick.length === k) { out.push(pick.slice()); return; } for (let i = st; i < arr.length; i++) { pick.push(arr[i]); rec(i + 1, pick); pick.pop(); } })(0, []);
+      return out;
+    };
+    for (let k = 0; k <= Math.min(maxHole, hole.length, 5); k++) {
+      if (5 - k > board.length) continue;
+      for (const hs of choose(hole, k)) for (const bs of choose(board, 5 - k)) {
+        const five = hs.concat(bs);
+        const val = eval5(five);
+        if (!best || cmp(val, best.value) > 0) best = { value: val, cards: five };
+      }
+    }
+    if (!best) return bestHand(hole.concat(board));
+    let name = CAT[best.value[0]];
+    if (best.value[0] === 8 && best.value[1] === 14) name = 'Royal flush';
+    return { ...best, name };
+  }
+
+  /** Re-judge a finished online showdown with the current rules. */
+  function rejudge(hand) {
+    if (!hand || hand.status !== 'done' || !hand.shown || hand.result.how !== 'showdown') return null;
+    const h = clone(hand);
+    for (const p in h.shown) {
+      const bh = bestFor(h.game, h.shown[p].cards, h.board);
+      h.shown[p] = { ...h.shown[p], best: bh.cards, name: bh.name, value: bh.value };
+    }
+    const decided = h.result.pots.map((pot) => {
+      let best = null, winners = [];
+      for (const p of pot.eligible) {
+        const c = best ? cmp(h.shown[p].value, best) : 1;
+        if (c > 0) { best = h.shown[p].value; winners = [p]; } else if (c === 0) winners.push(p);
+      }
+      return { amt: pot.amt, eligible: pot.eligible, winners };
+    });
+    const old = hand.result.delta;
+    const res = finish(h, decided, 'showdown');
+    res.rejudged = true;
+    const diff = {};
+    for (const p of res.seats) diff[p] = (res.result.delta[p] || 0) - (old[p] || 0);
+    return { hand: res, diff };
+  }
+
   /* ---------- chips ---------- */
   function chipBreakdown(amount) {
     const out = {};
@@ -339,7 +386,7 @@
       const sec = unseal(h.secret, h.key);
       const shown = {};
       for (const p of liveList(h)) {
-        const bh = bestHand(sec.holes[p].concat(h.board));
+        const bh = bestFor(h.game, sec.holes[p], h.board);
         shown[p] = { cards: sec.holes[p], best: bh.cards, name: bh.name, value: bh.value };
       }
       h.shown = shown;
@@ -499,7 +546,7 @@
 
   const Engine = {
     RANKS, CHIPS, STREETS, GAMES, DABBA, limitsFor,
-    newDeck, shuffle, eval5, bestHand, cmp, chipBreakdown, buildPots, splitPot,
+    newDeck, shuffle, eval5, bestHand, bestFor, rejudge, cmp, chipBreakdown, buildPots, splitPot,
     startHand, adjustInHand, options, act, canChange, changeBet, resolveShowdown, resume, myHole, seal, unseal, potTotal,
     liveList, canActList, ledger, settleUp, openLoans, pickBank,
   };

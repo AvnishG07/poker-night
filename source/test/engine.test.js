@@ -159,3 +159,18 @@ console.log('all', n, 'checks passed');
   ok(E.adjustInHand(c, 'A', 500, 0) === null, 'capped player: new chips stay outside the hand');
 }
 console.log('mid-hand checks ok');
+
+{
+  // Board makes a flush with 3 hole hearts only if all 3 used → not allowed
+  const b = E.bestFor('limit', ['Ah','Kh','Qh'], ['2h','3h','9c','9d','5s','7c']);
+  ok(b.name !== 'Flush', '3-card flush not allowed: ' + b.name);
+  const b2 = E.bestFor('limit', ['Ah','Kh','2c'], ['2h','3h','9h','9d','5s','7c']);
+  ok(b2.name === 'Flush', '2 own + 3 board flush ok');
+  ok(E.bestFor('allin', ['Ah','Kh'], ['2h','3h','9h','9d','5s']).name === 'Flush', 'holdem unchanged');
+  // rejudge
+  let h = E.startHand({ no: 50, game: 'limit', mode: 'online', seats: ['A','B'], dealer: 'A', stacks: { A: 900, B: 900 }, limitStructure: 'flat' });
+  while (h.status === 'betting') h = E.act(h, h.toAct, { type: E.options(h, h.toAct).canCheck ? 'check' : 'call' });
+  const r = E.rejudge(h);
+  ok(r && Object.values(r.diff).reduce((a,b)=>a+b,0) === 0, 'rejudge diff zero-sum');
+  console.log('two-card rule ok');
+}

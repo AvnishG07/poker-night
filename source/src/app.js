@@ -658,7 +658,7 @@
     if (h.mode === 'online' && h.seats.includes(S.me.id)) {
       const mine = cardsOf(S.me.id) || [];
       let hint = '';
-      if (mine.length && h.board.length >= 3 && !h.folded[S.me.id]) { const b = E.bestHand(mine.concat(h.board)); hint = `<div class="small mute" style="text-align:center">You have: <b style="color:var(--ink)">${b.name}</b></div>`; }
+      if (mine.length && h.board.length >= 3 && !h.folded[S.me.id]) { const b = E.bestFor(h.game, mine, h.board); hint = `<div class="small mute" style="text-align:center">You have: <b style="color:var(--ink)">${b.name}</b></div>`; }
       out += `<div class="card" style="padding:10px"><div class="mine">${mine.map((c) => cardHTML(c, 'big')).join('')}</div>${hint}</div>`;
     }
     // change bet
@@ -750,7 +750,31 @@
     return `<div class="felt result"><div class="hinfo"><span>Hand #${h.no} result</span><span>${res.how === 'fold' ? 'Others folded' : 'Showdown'}</span></div>
       ${h.board && h.board.length ? `<div class="board">${boardHTML(h.board, h.game, '')}</div>` : '<div style="height:8px"></div>'}
       ${winners.map(([p, d]) => `<div class="w">🏆 ${esc(nm(p))} wins ${rs(res.payout[p])} <span class="small mute">(${sgn(d)})</span></div>`).join('')}
-      ${shown}</div>`;
+      ${shown}
+      ${isAdmin() && h.game === 'limit' && h.mode === 'online' && res.how === 'showdown' && !h.rejudged && h.no === S.session.handNo
+        ? `<button class="btn gold full" style="margin-top:10px" data-act="rejudge">Re-check this hand (max 2 own cards)</button>` : ''}
+      ${h.rejudged ? '<div class="small mute" style="margin-top:6px">✔ Re-checked with the 2-card rule</div>' : ''}</div>`;
+  }
+  async function rejudgeLast() {
+    const cur = await S.store.get(handPath());
+    const r = E.rejudge(cur);
+    if (!r) throw new Error('Nothing to re-check');
+    if (cur.rejudged) throw new Error('Already re-checked');
+    const changed = Object.values(r.diff).some((d) => d);
+    // fix balances first (only if the old result was already added)
+    await mutateSession((s) => {
+      if ((s.appliedHand || 0) < cur.no) return false;
+      for (const p in r.diff) s.stacks[p] = (s.stacks[p] || 0) + r.diff[p];
+      logEntry(s, { t: 'rejudge', no: cur.no, diff: r.diff });
+    });
+    await mutate(handPath(), (h) => (h && h.no === cur.no && !h.rejudged ? strip(r.hand) : false));
+    const names = {}; r.hand.seats.forEach((p) => (names[p] = nm(p)));
+    await S.store.set(sessPath() + '/hands/h' + String(cur.no).padStart(5, '0'), {
+      no: cur.no, ts: Date.now(), game: cur.game, mode: cur.mode, dealer: cur.dealer, board: cur.board || [],
+      pots: r.hand.result.pots.map((p) => ({ amt: p.amt, winners: p.winners })), delta: r.hand.result.delta, how: 'showdown', names, rejudged: true,
+      shown: Object.fromEntries(Object.entries(r.hand.shown).map(([p, v]) => [p, { cards: v.cards, name: v.name }])),
+    });
+    toast(changed ? 'Result corrected — chips updated' : 'Checked — the winner stays the same');
   }
 
   function setupCard() {
@@ -842,6 +866,7 @@
         else if (e.t === 'loan') t = `${esc(nm(e.from))} lent ${esc(nm(e.to))} <b>${rs(e.a)}</b>`;
         else if (e.t === 'repay') t = `${esc(nm(e.from))} repaid ${esc(nm(e.to))} <b>${rs(e.a)}</b>`;
         else if (e.t === 'bank') t = `🎲 ${esc(nm(e.p))} picked as bank`;
+        else if (e.t === 'rejudge') t = `🔁 Hand #${e.no} re-checked: ` + Object.entries(e.diff).filter(([, d]) => d).map(([p, d]) => `${esc(nm(p))} ${sgn(d)}`).join(', ');
         return `<div class="li small"><div class="grow">${t}</div><div class="mute">${new Date(e.ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</div></div>`;
       }).join('')}</div></div>`;
     }
@@ -942,6 +967,7 @@
       case 'capSame': return run(async () => { await setCap(Number(v)); S.ui.cap = null; });
       case 'setting': if (el.dataset.k === 'mode') return; return run(() => saveSettings({ [el.dataset.k]: el.dataset.k === 'lastLimit' ? Number(v) : v }));
       case 'deal': return run(requestDeal);
+      case 'rejudge': return run(rejudgeLast);
       case 'rz': {
         const o = E.options(h, actorPid());
         if (!o) return;
