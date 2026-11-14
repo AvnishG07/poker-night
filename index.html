@@ -1064,12 +1064,30 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
   }
 
   /* ---------- hand lifecycle ---------- */
+  // Online cards: only the admin's phone may hold the deck, so a dealer who isn't
+  // admin sends a "please deal" request and the admin's phone deals it.
+  async function requestDeal() {
+    if (S.session.settings.mode === 'online' && split() && !isAdmin()) {
+      await mutateSession((s) => { s.dealRequest = { by: S.me.id, at: Date.now(), forHand: (s.handNo || 0) + 1 }; });
+      toast('Dealing… (via host\'s phone)');
+      return;
+    }
+    await dealHand();
+  }
+  let dealingNow = false;
   async function dealHand() {
     const cur = await S.store.get(handPath());
     if (cur && cur.status !== 'done') throw new Error('A hand is already running');
-    let hand;
+    // Repair: a finished hand that never got settled → settle it now.
+    if (cur && cur.status === 'done' && (S.session.appliedHand || 0) < cur.no) await applyResult(cur);
+    const curNo = cur ? cur.no : 0;
+    let hand, prevDealer;
     await mutateSession((s) => {
+      // Repair: a deal that failed halfway (hand number moved on but no hand was created).
+      if ((s.appliedHand || 0) < (s.handNo || 0) && curNo < s.handNo) { s.handNo = Math.max(curNo, s.appliedHand || 0); }
       if ((s.appliedHand || 0) < (s.handNo || 0)) throw new Error('Last hand is still being settled — wait a second');
+      prevDealer = s.lastDealer || null;
+      s.dealRequest = null;
       const seats = seatsFor(s);
       if (seats.length < 2) throw new Error('Need at least 2 players with chips (bank gives chips in Players)');
       const dealer = nextDealer(s) || seats[Math.floor(Math.random() * seats.length)];
@@ -1087,14 +1105,20 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
       });
       s.handNo = hand.no; s.lastDealer = dealer;
     });
-    if (split() && hand.mode === 'online') {
-      await S.store.set(secretPath(), { secret: hand.secret, key: hand.key, no: hand.no });
-      const sec = E.unseal(hand.secret, hand.key);
-      await Promise.all(hand.seats.map((p) => S.store.set(holePath(p), {
-        uid: S.session.players[p] && !S.session.players[p].offline ? p : 'host', cards: sec.holes[p], no: hand.no,
-      })));
+    try {
+      if (split() && hand.mode === 'online') {
+        await S.store.set(secretPath(), { secret: hand.secret, key: hand.key, no: hand.no });
+        const sec = E.unseal(hand.secret, hand.key);
+        await Promise.all(hand.seats.map((p) => S.store.set(holePath(p), {
+          uid: S.session.players[p] && !S.session.players[p].offline ? p : 'host', cards: sec.holes[p], no: hand.no,
+        })));
+      }
+      await S.store.set(handPath(), strip(hand));
+    } catch (e) {
+      // Undo the half-done deal so the table isn't stuck.
+      await mutateSession((s) => { if (s.handNo === hand.no && (s.appliedHand || 0) < hand.no) { s.handNo = hand.no - 1; s.lastDealer = prevDealer; } else return false; });
+      throw new Error('Could not deal — try again');
     }
-    await S.store.set(handPath(), strip(hand));
     S.ui.raise = 0;
     if (hand.status === 'done') await applyResult(hand);
   }
@@ -1252,6 +1276,13 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
     if (!sid) { render(); return; }
     S.unsub.push(S.store.onDoc('sessions/' + sid, (d) => {
       S.session = d;
+      if (d && d.dealRequest && d.dealRequest.forHand === (d.handNo || 0) + 1 && isAdmin() && !dealingNow) {
+        dealingNow = true;
+        setTimeout(() => run(async () => {
+          try { await dealHand(); }
+          catch (e) { await mutateSession((s) => { s.dealRequest = null; }); throw e; }
+        }).finally(() => { dealingNow = false; }), 200);
+      }
       if (d && split() && !S.secretSub && (d.adminId === S.me.id || S.store.isOwner)) {
         S.secretSub = S.store.onDoc('sessions/' + sid + '/secret/hand', (x) => { S.secret = x; render(); }, () => {});
         S.unsub.push(S.secretSub);
@@ -1711,7 +1742,7 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
       case 'capNone': return run(async () => { await setCap(0); S.ui.cap = null; });
       case 'capSame': return run(async () => { await setCap(Number(v)); S.ui.cap = null; });
       case 'setting': if (el.dataset.k === 'mode') return; return run(() => saveSettings({ [el.dataset.k]: el.dataset.k === 'lastLimit' ? Number(v) : v }));
-      case 'deal': return run(dealHand);
+      case 'deal': return run(requestDeal);
       case 'rz': {
         const o = E.options(h, actorPid());
         if (!o) return;
