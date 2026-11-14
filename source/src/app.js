@@ -391,12 +391,12 @@
   }
 
   async function endNight() {
-    noHandCheck();
+    if (handLive()) throw new Error('Finish the current hand first, then end the night');
     const ids = pids();
     await mutateSession((s) => {
       const rows = E.ledger(s, ids);
       s.final = { rows, pays: E.settleUp(rows), at: Date.now() };
-      s.status = 'closed';
+      s.status = 'closed'; s.endedBy = S.me.id;
     });
     await mutate('config/main', (c) => ({ ...(c || {}), activeSessionId: null }));
   }
@@ -639,19 +639,7 @@
     } else {
       h += `<div class="card empty">No game running right now.<br>The host will start one — keep this page open.</div>`;
     }
-    const past = S.nights.filter((n) => n.status === 'closed');
-    if (past.length) {
-      h += `<div class="card"><h3>Past nights</h3><div class="list">` + past.map((n) => {
-        const open = S.ui.viewNight === n.id;
-        let inner = '';
-        if (open && n.final) {
-          inner = `<div style="width:100%">` + finalTable(n.final.rows, n.players) +
-            `<div style="margin-top:8px">` + (n.final.pays.length ? n.final.pays.map((p) => `<div class="small">${esc(n.players[p.from]?.name)} → ${esc(n.players[p.to]?.name)} <b>${rs(p.amt)}</b></div>`).join('') : '<div class="small mute">Everyone is square</div>') + `</div></div>`;
-        }
-        return `<div class="li" style="flex-wrap:wrap"><div class="grow"><div><b>${esc(n.name)}</b></div><div class="small mute">${new Date(n.createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })} · ${n.handNo || 0} hands</div></div>
-          <button class="btn sm" data-act="viewNight" data-v="${esc(n.id)}">${open ? 'Hide' : 'Results'}</button>${inner}</div>`;
-      }).join('') + `</div></div>`;
-    }
+    h += pastNightsView();
     return h;
   }
 
@@ -791,7 +779,7 @@
     }
     return `<div class="felt result"><div class="hinfo"><span>Hand #${h.no} result</span><span>${res.how === 'fold' ? 'Others folded' : 'Showdown'}</span></div>
       ${h.board && h.board.length ? `<div class="board">${boardHTML(h.board, h.game, '')}</div>` : '<div style="height:8px"></div>'}
-      ${winners.map(([p, d]) => `<div class="w">🏆 ${esc(nm(p))} wins ${rs(res.payout[p])} <span class="small mute">(${sgn(d)})</span></div>`).join('')}
+      ${(winners.length ? winners : Object.entries(res.payout).filter(([, x]) => x > 0)).map(([p, d]) => `<div class="w">🏆 ${esc(nm(p))} wins ${rs(res.payout[p])} <span class="small mute">(${sgn(res.delta[p])})</span></div>`).join('')}
       ${shown}
       ${isAdmin() && h.game === 'limit' && h.mode === 'online' && res.how === 'showdown' && !h.rejudged && h.no === S.session.handNo
         ? `<button class="btn gold full" style="margin-top:10px" data-act="rejudge">Re-check this hand (max 2 own cards)</button>` : ''}
@@ -915,16 +903,58 @@
     return h;
   }
 
-  function handsView() {
-    if (!S.history.length) return `<div class="card empty">No hands played yet</div>`;
-    return `<div class="card"><h3>Hand history</h3><div class="list">${S.history.map((r) => {
-      const ws = Object.entries(r.delta).filter(([, d]) => d > 0);
-      const name = (p) => (r.names && r.names[p]) || nm(p);
-      return `<div class="li" style="flex-wrap:wrap"><div class="grow"><div><b>#${r.no}</b> <span class="small mute">${esc(E.GAMES[r.game].short)} · ${r.how === 'fold' ? 'won uncontested' : 'showdown'}</span></div>
-        <div class="small">${ws.map(([p, d]) => `🏆 ${esc(name(p))} <span class="pos">${sgn(d)}</span>`).join(' · ')}</div>
-        <div class="small mute">${Object.entries(r.delta).filter(([, d]) => d < 0).map(([p, d]) => `${esc(name(p))} <span class="neg">${sgn(d)}</span>`).join(' · ')}</div></div>
+  function handRows(rows, nameFn) {
+    return rows.map((r) => {
+      const ws = Object.entries(r.delta || {}).filter(([, d]) => d > 0);
+      const name = (p) => (r.names && r.names[p]) || nameFn(p);
+      const shown = r.shown ? `<div class="small mute" style="margin-top:2px">${Object.entries(r.shown).map(([p, v]) => `${esc(name(p))}: ${(v.cards || []).map((c) => c[0].replace('T', '10') + { s: '♠', h: '♥', d: '♦', c: '♣' }[c[1]]).join(' ')} (${esc(v.name)})`).join(' · ')}</div>` : '';
+      return `<div class="li" style="flex-wrap:wrap"><div class="grow"><div><b>#${r.no}</b> <span class="small mute">${esc((E.GAMES[r.game] || {}).short || '')} · ${r.how === 'fold' ? 'won uncontested' : 'showdown'}${r.rejudged ? ' · re-checked' : ''}</span></div>
+        <div class="small">${ws.length ? ws.map(([p, d]) => `🏆 ${esc(name(p))} <span class="pos">${sgn(d)}</span>`).join(' · ')
+          : [...new Set((r.pots || []).flatMap((x) => x.winners || []))].map((p) => `🏆 ${esc(name(p))} <span class="mute">won the pot back (₹0)</span>`).join(' · ')}</div>
+        <div class="small mute">${Object.entries(r.delta || {}).filter(([, d]) => d < 0).map(([p, d]) => `${esc(name(p))} <span class="neg">${sgn(d)}</span>`).join(' · ')}</div>${shown}</div>
         ${r.board && r.board.length ? `<div class="row" style="gap:2px">${boardHTML(r.board, r.game, 'sm')}</div>` : ''}</div>`;
-    }).join('')}</div></div>`;
+    }).join('');
+  }
+
+  // Past nights: last 10 finished nights, with results and every hand.
+  function openNight(id) {
+    S.ui.viewNight = id;
+    if (S.pastUnsub) { try { S.pastUnsub(); } catch (e) {} S.pastUnsub = null; }
+    S.pastHands = null;
+    if (id) {
+      S.pastUnsub = S.store.onQuery('sessions/' + id + '/hands', { orderBy: 'no', dir: 'desc', limit: 300 }, (rows) => { S.pastHands = rows; render(); }, onErr);
+    }
+    render(); window.scrollTo(0, 0);
+  }
+  function pastNightsView() {
+    const past = S.nights.filter((n) => n.status === 'closed').slice(0, 10);
+    const n = S.ui.viewNight && past.find((x) => x.id === S.ui.viewNight);
+    if (n) {
+      const pname = (p) => (n.players && n.players[p] && n.players[p].name) || 'Player';
+      let h = `<div class="card"><div class="row"><button class="btn sm" data-act="viewNight" data-v="">← All nights</button><div class="grow"></div></div>
+        <h3 style="margin-top:10px">${esc(n.name)}</h3>
+        <div class="small mute">${new Date(n.createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })} · ${n.handNo || 0} hands${n.endedBy ? ' · ended by ' + esc(pname(n.endedBy)) : ''}</div></div>`;
+      if (n.final) {
+        h += `<div class="card"><h3>Final result</h3>${finalTable(n.final.rows, n.players)}
+          <div style="margin-top:10px">${n.final.pays.length ? n.final.pays.map((p) => `<div class="li small"><div class="grow">${esc(pname(p.from))} pays <b>${esc(pname(p.to))}</b></div><div class="num">${rs(p.amt)}</div></div>`).join('') : '<div class="small mute">Everyone was square</div>'}</div></div>`;
+      }
+      h += `<div class="card"><h3>Hand by hand</h3>${S.pastHands == null ? '<div class="empty">Loading…</div>' : S.pastHands.length ? `<div class="list">${handRows(S.pastHands, pname)}</div>` : '<div class="small mute">No hands were played</div>'}</div>`;
+      return h;
+    }
+    if (!past.length) return `<div class="card empty">No finished nights yet</div>`;
+    return `<div class="card"><h3>Past nights (last 10)</h3><div class="list">` + past.map((x) => {
+      const me = x.final && x.final.rows && x.final.rows[S.me.id];
+      return `<div class="li"><div class="grow"><div><b>${esc(x.name)}</b></div><div class="small mute">${new Date(x.createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })} · ${x.handNo || 0} hands${me ? ` · you <span class="${me.net > 0 ? 'pos' : me.net < 0 ? 'neg' : ''}">${sgn(me.net)}</span>` : ''}</div></div>
+        <button class="btn sm" data-act="viewNight" data-v="${esc(x.id)}">Open</button></div>`;
+    }).join('') + `</div></div>`;
+  }
+
+  function handsView() {
+    const tab = S.ui.handsTab || 'tonight';
+    let h = `<div class="seg" style="margin-top:10px"><button class="${tab === 'tonight' ? 'on' : ''}" data-act="handsTab" data-v="tonight">Tonight</button><button class="${tab === 'past' ? 'on' : ''}" data-act="handsTab" data-v="past">Past nights</button></div>`;
+    if (tab === 'past') return h + pastNightsView();
+    if (!S.history.length) return h + `<div class="card empty">No hands played yet</div>`;
+    return h + `<div class="card"><h3>Hand history</h3><div class="list">${handRows(S.history, nm)}</div></div>`;
   }
 
   function chatView() {
@@ -955,7 +985,7 @@
     let h = `<div class="card"><h3>Where everyone stands</h3>${finalTable(rows, s.players)}
       <div class="small mute" style="margin-top:8px">Net = chips now − taken from bank − borrowed + lent.</div></div>`;
     h += `<div class="card"><h3>If we stopped now</h3>${pays.length ? `<div class="list">${pays.map((p) => `<div class="li"><div class="grow">${esc(nm(p.from))} pays <b>${esc(nm(p.to))}</b></div><div class="num">${rs(p.amt)}</div></div>`).join('')}</div>` : '<div class="small mute">Everyone is square</div>'}</div>`;
-    if (isAdmin()) h += `<button class="btn red full" data-act="modal" data-m="end">End the night</button>`;
+    if (isAdmin() || isPlayer()) h += `<button class="btn red full" data-act="modal" data-m="end">End the night & see final result</button>`;
     return h;
   }
 
@@ -973,7 +1003,7 @@
       inner = `<h2>Lend to ${esc(nm(m.pid))}</h2><div class="small mute">From your chips (${rs(S.session.stacks[S.me.id] || 0)}). ${esc(nm(m.pid))} will owe you.</div>${amtPicker()}
         <button class="btn gold full" data-act="doLend">Lend ${rs(S.ui.amt)}</button>`;
     } else if (m.type === 'end') {
-      inner = `<h2>End the night?</h2><div class="small mute" style="margin-bottom:12px">Final balances get saved and the table closes. This can't be undone.</div>
+      inner = `<h2>End the night for everyone?</h2><div class="small mute" style="margin-bottom:12px">The table closes for all players and the final result is saved. This can't be undone. (To just peek at standings, the Settle tab already shows them live.)</div>
         <button class="btn red full" data-act="doEnd">Yes, end and save results</button>`;
     }
     return `<div class="modal" data-act="closeModal"><div class="sheet" data-stop="1">${inner}<div style="height:8px"></div><button class="btn ghost full" data-act="closeModal">Cancel</button></div></div>`;
@@ -1046,9 +1076,10 @@
       case 'amt': S.ui.amt = v === 'clear' ? 0 : S.ui.amt + Number(v); render(); return;
       case 'doGive': return run(async () => { await giveChips(S.ui.modal.pid, S.ui.amt); S.ui.modal = null; render(); });
       case 'doLend': return run(async () => { await lend(S.me.id, S.ui.modal.pid, S.ui.amt); S.ui.modal = null; render(); });
-      case 'doEnd': return run(async () => { await endNight(); S.ui.modal = null; S.tab = 'table'; render(); });
+      case 'doEnd': return run(async () => { const id = S.sid; await endNight(); S.ui.modal = null; S.tab = 'table'; S.ui.endedId = id; render(); });
       case 'send': return run(sendChat);
-      case 'viewNight': S.ui.viewNight = S.ui.viewNight === v ? null : v; render(); return;
+      case 'viewNight': openNight(v || null); return;
+      case 'handsTab': S.ui.handsTab = v; if (v === 'tonight') openNight(null); else render(); return;
     }
   });
 
@@ -1069,10 +1100,14 @@
     S.store.onDoc('config/main', (c) => {
       S.config = c;
       const sid = c && c.activeSessionId;
-      if (sid !== S.sid) subscribeSession(sid);
+      if (sid !== S.sid) {
+        const ended = S.sid;
+        subscribeSession(sid);
+        if (!sid && ended) openNight(ended); // night just ended → show its final result
+      }
       else render();
     }, onErr);
-    S.store.onQuery('sessions', { orderBy: 'createdAt', dir: 'desc', limit: 20 }, (rows) => { S.nights = rows; render(); }, onErr);
+    S.store.onQuery('sessions', { orderBy: 'createdAt', dir: 'desc', limit: 25 }, (rows) => { S.nights = rows; render(); }, onErr);
     render();
   })();
 })();
