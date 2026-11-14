@@ -916,7 +916,46 @@
     return h;
   }
 
-  function handRows(rows, nameFn) {
+  // Re-check an earlier hand of tonight with the current rules and fix chips by the difference.
+  async function rejudgeHistory(no) {
+    const r = S.history.find((x) => x.no === no);
+    if (!r) throw new Error('Hand not found');
+    if (r.rejudged) throw new Error('Already re-checked');
+    if (!r.shown || r.how !== 'showdown') throw new Error('Nothing to re-check (no showdown)');
+    if ((r.pots || []).length !== 1) throw new Error('This hand had side pots — tell Claude the hand number to fix it');
+    const players = Object.keys(r.shown);
+    const val = {};
+    for (const p of players) { const b = E.bestFor(r.game, r.shown[p].cards, r.board || []); val[p] = b; }
+    let best = null, winners = [];
+    for (const p of players) { const c = best ? E.cmp(val[p].value, best) : 1; if (c > 0) { best = val[p].value; winners = [p]; } else if (c === 0) winners.push(p); }
+    const seats = Object.keys(r.delta);
+    const pot = r.pots[0];
+    const oldPay = E.splitPot(pot.amt, pot.winners, seats);
+    const newPay = E.splitPot(pot.amt, winners, seats);
+    const diff = {}, newDelta = {};
+    for (const p of seats) {
+      const contrib = (oldPay[p] || 0) - (r.delta[p] || 0);
+      newDelta[p] = (newPay[p] || 0) - contrib;
+      diff[p] = newDelta[p] - (r.delta[p] || 0);
+    }
+    const changed = Object.values(diff).some((d) => d);
+    if (changed) {
+      await mutateSession((s) => {
+        for (const p in diff) s.stacks[p] = (s.stacks[p] || 0) + diff[p];
+        logEntry(s, { t: 'rejudge', no, diff });
+      });
+    }
+    await S.store.set(sessPath() + '/hands/h' + String(no).padStart(5, '0'), {
+      ...r, id: undefined, delta: newDelta, pots: [{ amt: pot.amt, winners }], rejudged: true,
+      shown: Object.fromEntries(players.map((p) => [p, { cards: r.shown[p].cards, name: val[p].name }])),
+    });
+    if (S.hand && S.hand.no === no && S.hand.status === 'done') {
+      await mutate(handPath(), (h) => (h && h.no === no ? { ...h, rejudged: true } : false));
+    }
+    toast(changed ? 'Hand #' + no + ' corrected — chips updated' : 'Hand #' + no + ' checked — winner stays the same');
+  }
+
+  function handRows(rows, nameFn, canFix) {
     return rows.map((r) => {
       const ws = Object.entries(r.delta || {}).filter(([, d]) => d > 0);
       const name = (p) => (r.names && r.names[p]) || nameFn(p);
@@ -925,7 +964,8 @@
         <div class="small">${ws.length ? ws.map(([p, d]) => `🏆 ${esc(name(p))} <span class="pos">${sgn(d)}</span>`).join(' · ')
           : [...new Set((r.pots || []).flatMap((x) => x.winners || []))].map((p) => `🏆 ${esc(name(p))} <span class="mute">won the pot back (₹0)</span>`).join(' · ')}</div>
         <div class="small mute">${Object.entries(r.delta || {}).filter(([, d]) => d < 0).map(([p, d]) => `${esc(name(p))} <span class="neg">${sgn(d)}</span>`).join(' · ')}</div>${shown}</div>
-        ${r.board && r.board.length ? `<div class="row" style="gap:2px">${boardHTML(r.board, r.game, 'sm')}</div>` : ''}</div>`;
+        ${r.board && r.board.length ? `<div class="row" style="gap:2px">${boardHTML(r.board, r.game, 'sm')}</div>` : ''}
+        ${canFix && r.how === 'showdown' && r.shown && r.game === 'limit' && !r.rejudged ? `<button class="btn sm" style="width:100%;margin-top:6px" data-act="rejudgeNo" data-v="${r.no}">Re-check hand #${r.no} (new rules)</button>` : ''}</div>`;
     }).join('');
   }
 
@@ -967,7 +1007,7 @@
     let h = `<div class="seg" style="margin-top:10px"><button class="${tab === 'tonight' ? 'on' : ''}" data-act="handsTab" data-v="tonight">Tonight</button><button class="${tab === 'past' ? 'on' : ''}" data-act="handsTab" data-v="past">Past nights</button></div>`;
     if (tab === 'past') return h + pastNightsView();
     if (!S.history.length) return h + `<div class="card empty">No hands played yet</div>`;
-    return h + `<div class="card"><h3>Hand history</h3><div class="list">${handRows(S.history, nm)}</div></div>`;
+    return h + `<div class="card"><h3>Hand history</h3><div class="list">${handRows(S.history, nm, isAdmin())}</div></div>`;
   }
 
   function chatView() {
@@ -1054,6 +1094,7 @@
       case 'setting': if (el.dataset.k === 'mode') return; return run(() => saveSettings({ [el.dataset.k]: el.dataset.k === 'lastLimit' ? Number(v) : v }));
       case 'deal': return run(requestDeal);
       case 'rejudge': return run(rejudgeLast);
+      case 'rejudgeNo': return run(() => rejudgeHistory(Number(v)));
       case 'rz': {
         const o = E.options(h, actorPid());
         if (!o) return;
