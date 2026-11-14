@@ -408,6 +408,46 @@
     await S.store.add(sessPath() + '/chat', { by: S.me.id, name: nm(S.me.id), text: text.slice(0, 500), ts: Date.now() });
   }
 
+  /* ---------- turn alert: beep + vibration + voice ---------- */
+  let soundOn = true, audioCtx = null;
+  try { soundOn = localStorage.getItem('poker-sound') !== 'off'; } catch (e) {}
+  function unlockAudio() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      if (window.speechSynthesis && !unlockAudio.spoke) { const u = new SpeechSynthesisUtterance(''); speechSynthesis.speak(u); unlockAudio.spoke = true; }
+    } catch (e) {}
+  }
+  document.addEventListener('click', unlockAudio, true);
+  document.addEventListener('touchstart', unlockAudio, { capture: true, passive: true });
+  function beep() {
+    if (!audioCtx) return;
+    try {
+      const t = audioCtx.currentTime;
+      [0, 0.18].forEach((off, i) => {
+        const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+        o.type = 'sine'; o.frequency.value = i ? 1046 : 784;
+        g.gain.setValueAtTime(0.0001, t + off); g.gain.exponentialRampToValueAtTime(0.35, t + off + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + off + 0.16);
+        o.connect(g); g.connect(audioCtx.destination); o.start(t + off); o.stop(t + off + 0.17);
+      });
+    } catch (e) {}
+  }
+  function notifyTurn(pid) {
+    S.turnFlash = Date.now();
+    try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
+    if (!soundOn) return;
+    beep();
+    try {
+      if (window.speechSynthesis) {
+        speechSynthesis.cancel();
+        const who = nm(pid);
+        const u = new SpeechSynthesisUtterance(pid === S.me.id ? 'Your turn, ' + who : who + "'s turn");
+        u.lang = 'en-IN'; u.rate = 1;
+        setTimeout(() => speechSynthesis.speak(u), 400);
+      }
+    } catch (e) {}
+  }
+
   /* ---------- voice notes (own hosting) ---------- */
   let rec = null, recChunks = [], recTimer = null, recStart = 0, recTick = null;
   const blobToDataURL = (b) => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(b); });
@@ -493,10 +533,11 @@
     S.unsub.push(S.store.onQuery('sessions/' + sid + '/chat', { orderBy: 'ts', dir: 'desc', limit: 50 }, (rows) => { S.chat = rows.reverse(); render(); }, onErr));
   }
   function onHand(d) {
-      const wasMyTurn = S.hand && S.hand.toAct === S.me.id && S.hand.status === 'betting';
+      const wasActor = actorPid();
+      const prevKey = S.hand && S.hand.no + ':' + S.hand.toAct;
       S.hand = d;
-      const myTurn = d && d.toAct === S.me.id && d.status === 'betting';
-      if (myTurn && !wasMyTurn) { try { navigator.vibrate && navigator.vibrate(120); } catch (e) {} }
+      const nowActor = actorPid();
+      if (nowActor && (nowActor !== wasActor || prevKey !== d.no + ':' + d.toAct)) notifyTurn(nowActor);
       // Fallback: if a finished hand wasn't settled (someone's phone dropped), the admin settles it.
       if (d && split() && d.mode === 'online' && d.seats.includes(S.me.id) && d.status !== 'done' && !(S.myHole && S.myHole.no === d.no)) fetchMyHole(d.no);
       if (d && split() && isAdmin() && (d.status === 'dealing' || d.status === 'reveal')) setTimeout(() => run(hostResume), 300);
@@ -556,7 +597,7 @@
     else if (S.tab === 'chat') body = chatView();
     else if (S.tab === 'settle') body = settleView();
 
-    const top = `<div class="top"><div class="brand">♠ Poker <b>Night</b></div><div class="sub">${S.session && S.session.status === 'open' ? esc(S.session.name) + ' · ' + (S.session.settings.mode === 'online' ? 'online' : 'real cards') + '<br>' : ''}${esc(S.me.name || '')}${S.session && isAdmin() ? ' · admin' : ''}</div></div>`;
+    const top = `<div class="top"><div class="brand">♠ Poker <b>Night</b></div><button class="btn sm ghost" data-act="sound" title="Turn alerts">${soundOn ? '🔊' : '🔇'}</button><div class="sub">${S.session && S.session.status === 'open' ? esc(S.session.name) + ' · ' + (S.session.settings.mode === 'online' ? 'online' : 'real cards') + '<br>' : ''}${esc(S.me.name || '')}${S.session && isAdmin() ? ' · admin' : ''}</div></div>`;
     const showNav = S.session && S.session.status === 'open' && (isPlayer() || isAdmin());
     const unread = S.chat.length && S.chat[S.chat.length - 1].ts > S.lastSeenChat && S.tab !== 'chat' && S.chat[S.chat.length - 1].by !== S.me.id;
     const myTurn = S.hand && S.hand.status === 'betting' && actorPid();
@@ -567,6 +608,7 @@
       ${navBtn('chat', '💬', 'Chat', unread)}
       ${navBtn('settle', '🧮', 'Settle')}
     </div></div>` : '';
+    if (myTurn) banners.unshift(`<div class="yourturn" data-act="tab" data-v="table">🔔 ${actorPid() === S.me.id ? 'YOUR TURN' : esc(nm(actorPid())) + "'S TURN (you play for them)"}</div>`);
     $app.innerHTML = top + banners.join('') + `<div class="wrap">${body}</div>` + nav + modalView();
 
     if (focusKey) {
@@ -953,6 +995,7 @@
     const h = S.hand;
     switch (a) {
       case 'mic': toggleMic(); return; // must run synchronously in the click
+      case 'sound': soundOn = !soundOn; try { localStorage.setItem('poker-sound', soundOn ? 'on' : 'off'); } catch (e) {} toast(soundOn ? 'Turn alerts on 🔊' : 'Turn alerts muted (vibration only)'); if (soundOn) { unlockAudio(); beep(); } render(); return;
       case 'rec': return run(toggleRecord);
       case 'tab': S.tab = v; render(); window.scrollTo(0, 0); return;
       case 'startNight': return run(startNight);

@@ -113,3 +113,6 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
 .rivercol{display:flex;flex-direction:column;gap:4px;margin-left:4px}
 .pc.side{width:66px;height:46px;flex-direction:row;gap:4px}
 .pc.side.sm{width:42px;height:30px;gap:2px}
+
+.yourturn{position:sticky;top:58px;z-index:5;margin:6px 14px;padding:12px;border-radius:12px;text-align:center;font-weight:800;letter-spacing:1px;background:linear-gradient(var(--gold),var(--gold2));color:#1c1405;animation:pulse 1s ease-in-out infinite;cursor:pointer}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(232,185,74,.7)}50%{box-shadow:0 0 0 10px rgba(232,185,74,0)}}
