@@ -794,8 +794,8 @@
       ${(winners.length ? winners : Object.entries(res.payout).filter(([, x]) => x > 0)).map(([p, d]) => `<div class="w">🏆 ${esc(nm(p))} wins ${rs(res.payout[p])} <span class="small mute">(${sgn(res.delta[p])})</span></div>`).join('')}
       ${shown}
       ${isAdmin() && h.game === 'limit' && h.mode === 'online' && res.how === 'showdown' && !h.rejudged && h.no === S.session.handNo
-        ? `<button class="btn gold full" style="margin-top:10px" data-act="rejudge">Re-check this hand (max 2 own cards)</button>` : ''}
-      ${h.rejudged ? '<div class="small mute" style="margin-top:6px">✔ Re-checked with the 2-card rule</div>' : ''}</div>`;
+        ? `<button class="btn gold full" style="margin-top:10px" data-act="rejudge">Re-check this hand (new rules)</button>` : ''}
+      ${h.rejudged ? '<div class="small mute" style="margin-top:6px">✔ Re-checked with current rules</div>' : ''}</div>`;
   }
   async function rejudgeLast() {
     const cur = await S.store.get(handPath());

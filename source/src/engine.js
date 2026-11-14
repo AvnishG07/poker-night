@@ -109,7 +109,17 @@
 
   /** Best hand for a game. Limit (3-card) game: at most 2 of your own cards may be used. */
   function bestFor(game, hole, board) {
-    const maxHole = game === 'limit' ? 2 : 5;
+    // Limit game: the 2 river cards are options — use only ONE of them.
+    if (game === 'limit' && board.length > 5) {
+      const base = board.slice(0, 4);
+      let top = null;
+      for (const r of board.slice(4, 6)) {
+        const b = bestFor('limit-one', hole, base.concat(r));
+        if (!top || cmp(b.value, top.value) > 0) top = b;
+      }
+      return top;
+    }
+    const maxHole = game === 'limit' || game === 'limit-one' ? 2 : 5;
     let best = null;
     const choose = (arr, k) => {
       const out = [];

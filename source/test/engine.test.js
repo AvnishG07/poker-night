@@ -174,3 +174,14 @@ console.log('mid-hand checks ok');
   ok(r && Object.values(r.diff).reduce((a,b)=>a+b,0) === 0, 'rejudge diff zero-sum');
   console.log('two-card rule ok');
 }
+
+{
+  // Both river cards would give a flush; only one may be used → no flush
+  const b = E.bestFor('limit', ['Ah','Kh','2c'], ['2h','9c','9d','5s','3h','4h']);
+  ok(b.name !== 'Flush', 'only one river card: ' + b.name);
+  // One river card completes a straight
+  const s2 = E.bestFor('limit', ['9h','8d','2c'], ['7s','6c','Kd','Qh','5h','2s']);
+  ok(s2.name === 'Straight', 'river option straight: ' + s2.name);
+  ok(s2.cards.filter((c) => ['5h','2s'].includes(c)).length <= 1, 'max one river card used');
+  console.log('one-river rule ok');
+}

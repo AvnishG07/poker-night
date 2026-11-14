@@ -249,7 +249,17 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
 
   /** Best hand for a game. Limit (3-card) game: at most 2 of your own cards may be used. */
   function bestFor(game, hole, board) {
-    const maxHole = game === 'limit' ? 2 : 5;
+    // Limit game: the 2 river cards are options — use only ONE of them.
+    if (game === 'limit' && board.length > 5) {
+      const base = board.slice(0, 4);
+      let top = null;
+      for (const r of board.slice(4, 6)) {
+        const b = bestFor('limit-one', hole, base.concat(r));
+        if (!top || cmp(b.value, top.value) > 0) top = b;
+      }
+      return top;
+    }
+    const maxHole = game === 'limit' || game === 'limit-one' ? 2 : 5;
     let best = null;
     const choose = (arr, k) => {
       const out = [];
@@ -1645,8 +1655,8 @@ table.t td{padding:8px 4px;text-align:right;border-bottom:1px solid rgba(255,255
       ${(winners.length ? winners : Object.entries(res.payout).filter(([, x]) => x > 0)).map(([p, d]) => `<div class="w">🏆 ${esc(nm(p))} wins ${rs(res.payout[p])} <span class="small mute">(${sgn(res.delta[p])})</span></div>`).join('')}
       ${shown}
       ${isAdmin() && h.game === 'limit' && h.mode === 'online' && res.how === 'showdown' && !h.rejudged && h.no === S.session.handNo
-        ? `<button class="btn gold full" style="margin-top:10px" data-act="rejudge">Re-check this hand (max 2 own cards)</button>` : ''}
-      ${h.rejudged ? '<div class="small mute" style="margin-top:6px">✔ Re-checked with the 2-card rule</div>' : ''}</div>`;
+        ? `<button class="btn gold full" style="margin-top:10px" data-act="rejudge">Re-check this hand (new rules)</button>` : ''}
+      ${h.rejudged ? '<div class="small mute" style="margin-top:6px">✔ Re-checked with current rules</div>' : ''}</div>`;
   }
   async function rejudgeLast() {
     const cur = await S.store.get(handPath());
