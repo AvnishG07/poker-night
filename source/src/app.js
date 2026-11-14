@@ -391,9 +391,21 @@
   }
 
   async function endNight() {
-    if (handLive()) throw new Error('Finish the current hand first, then end the night');
+    // A hand in progress is cancelled: everyone gets back what they put in (dabba included).
+    const cur = await S.store.get(handPath());
+    let voided = null;
+    if (cur && cur.status !== 'done') {
+      voided = cur.no;
+      const zero = {}; cur.seats.forEach((p) => (zero[p] = 0));
+      await mutate(handPath(), (h) => {
+        if (!h || h.status === 'done') return false;
+        return { ...h, status: 'done', toAct: null, undo: null, lastActor: null, v: (h.v || 0) + 1,
+          result: { how: 'void', pots: [], payout: zero, delta: zero }, refunded: { ...h.contrib } };
+      });
+    }
     const ids = pids();
     await mutateSession((s) => {
+      if (voided && (s.appliedHand || 0) < voided) { s.appliedHand = voided; logEntry(s, { t: 'void', no: voided }); }
       const rows = E.ledger(s, ids);
       s.final = { rows, pays: E.settleUp(rows), at: Date.now() };
       s.status = 'closed'; s.endedBy = S.me.id;
@@ -895,6 +907,7 @@
         if (e.t === 'issue') t = `🏦 Bank → ${esc(nm(e.p))} <b>${rs(e.a)}</b>`;
         else if (e.t === 'loan') t = `${esc(nm(e.from))} lent ${esc(nm(e.to))} <b>${rs(e.a)}</b>`;
         else if (e.t === 'repay') t = `${esc(nm(e.from))} repaid ${esc(nm(e.to))} <b>${rs(e.a)}</b>`;
+        else if (e.t === 'void') t = `↩️ Hand #${e.no} cancelled — everyone got their chips back`;
         else if (e.t === 'bank') t = `🎲 ${esc(nm(e.p))} picked as bank`;
         else if (e.t === 'rejudge') t = `🔁 Hand #${e.no} re-checked: ` + Object.entries(e.diff).filter(([, d]) => d).map(([p, d]) => `${esc(nm(p))} ${sgn(d)}`).join(', ');
         return `<div class="li small"><div class="grow">${t}</div><div class="mute">${new Date(e.ts).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}</div></div>`;
@@ -1003,7 +1016,7 @@
       inner = `<h2>Lend to ${esc(nm(m.pid))}</h2><div class="small mute">From your chips (${rs(S.session.stacks[S.me.id] || 0)}). ${esc(nm(m.pid))} will owe you.</div>${amtPicker()}
         <button class="btn gold full" data-act="doLend">Lend ${rs(S.ui.amt)}</button>`;
     } else if (m.type === 'end') {
-      inner = `<h2>End the night for everyone?</h2><div class="small mute" style="margin-bottom:12px">The table closes for all players and the final result is saved. This can't be undone. (To just peek at standings, the Settle tab already shows them live.)</div>
+      inner = `<h2>End the night for everyone?</h2><div class="small mute" style="margin-bottom:12px">The table closes for all players and the final result is saved. This can't be undone.${handLive() ? ' <b>The hand in progress will be cancelled and everyone gets back what they put in the pot.</b>' : ''} (To just peek at standings, the Settle tab already shows them live.)</div>
         <button class="btn red full" data-act="doEnd">Yes, end and save results</button>`;
     }
     return `<div class="modal" data-act="closeModal"><div class="sheet" data-stop="1">${inner}<div style="height:8px"></div><button class="btn ghost full" data-act="closeModal">Cancel</button></div></div>`;
