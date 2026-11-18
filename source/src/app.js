@@ -609,7 +609,7 @@
     else if (S.tab === 'chat') body = chatView();
     else if (S.tab === 'settle') body = settleView();
 
-    const top = `<div class="top"><div class="brand">♠ Poker <b>Night</b></div><button class="btn sm ghost" data-act="sound" title="Turn alerts">${soundOn ? '🔊' : '🔇'}</button><div class="sub">${S.session && S.session.status === 'open' ? esc(S.session.name) + ' · ' + (S.session.settings.mode === 'online' ? 'online' : 'real cards') + '<br>' : ''}${esc(S.me.name || '')}${S.session && isAdmin() ? ' · admin' : ''}</div></div>`;
+    const top = `<div class="top"><div class="brand">♠ Poker <b>Night</b></div><button class="btn sm ghost" data-act="sound" title="Turn alerts">${soundOn ? '🔊' : '🔇'}</button><div class="sub">${S.session && S.session.status === 'open' ? esc(S.session.name) + ' · ' + (S.session.settings.mode === 'online' ? 'online' : 'real cards') + '<br>' + hostLine(S.session) + '<br>' : ''}${esc(S.me.name || '')}${S.session && isAdmin() ? ' · admin' : ''}</div></div>`;
     const showNav = S.session && S.session.status === 'open' && (isPlayer() || isAdmin());
     const unread = S.chat.length && S.chat[S.chat.length - 1].ts > S.lastSeenChat && S.tab !== 'chat' && S.chat[S.chat.length - 1].by !== S.me.id;
     const myTurn = S.hand && S.hand.status === 'betting' && actorPid();
@@ -657,11 +657,20 @@
     return h;
   }
 
+  function hostLine(s) {
+    if (!s) return '';
+    const pl = s.players && s.players[s.adminId];
+    const who = s.adminId === S.me.id ? 'you' : (pl && pl.name) || 'someone';
+    const at = s.createdAt ? new Date(s.createdAt).toLocaleTimeString('en-IN', { hour: 'numeric', minute: '2-digit' }) : '';
+    return `Started by <b style="color:var(--ink)">${esc(who)}</b>${at ? ' at ' + at : ''}`;
+  }
+
   function joinView() {
     const s = S.session;
     const req = s.requests && s.requests[S.me.id];
     return `<div class="card"><h3>${esc(s.name)}</h3>
-      ${req ? `<div class="empty">Waiting for the host to add you…</div>` : `
+      <div class="small mute" style="margin-bottom:8px">${hostLine(s)}</div>
+      ${req ? `<div class="empty">Waiting for ${esc((s.players[s.adminId] && s.players[s.adminId].name) || 'the host')} to add you…</div>` : `
       <label class="lb">Your name at the table</label>
       <input class="in" data-bind="nick" placeholder="${esc(S.me.name || 'Your name')}" value="${esc(S.ui.nick)}">
       <div style="height:10px"></div><button class="btn gold full" data-act="join">Ask to join</button>`}
@@ -876,6 +885,7 @@
     const s = S.session;
     let h = '';
     // Bank
+    h += `<div class="card small mute" style="padding:10px 14px">🎲 ${esc(s.name)} · ${hostLine(s)}</div>`;
     h += `<div class="card"><h3>Bank</h3>${s.bankId
       ? `<div class="row"><div class="grow"><b style="font-size:18px">🏦 ${esc(nm(s.bankId))}</b><div class="small mute">Lends chips to everyone tonight</div></div></div>`
       : (isAdmin() ? `<div class="small mute" style="margin-bottom:8px">Picked at random. Last night's bank can't be bank again.</div><button class="btn gold full" data-act="pickBank">🎲 Pick bank randomly</button>` : `<div class="mute">Not chosen yet</div>`)}</div>`;
@@ -988,7 +998,7 @@
       const pname = (p) => (n.players && n.players[p] && n.players[p].name) || 'Player';
       let h = `<div class="card"><div class="row"><button class="btn sm" data-act="viewNight" data-v="">← All nights</button><div class="grow"></div></div>
         <h3 style="margin-top:10px">${esc(n.name)}</h3>
-        <div class="small mute">${new Date(n.createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })} · ${n.handNo || 0} hands${n.endedBy ? ' · ended by ' + esc(pname(n.endedBy)) : ''}</div></div>`;
+        <div class="small mute">${new Date(n.createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })} · ${n.handNo || 0} hands${n.adminId ? ' · started by ' + esc(pname(n.adminId)) : ''}${n.endedBy ? ' · ended by ' + esc(pname(n.endedBy)) : ''}</div></div>`;
       if (n.final) {
         h += `<div class="card"><h3>Final result</h3>${finalTable(n.final.rows, n.players)}
           <div style="margin-top:10px">${n.final.pays.length ? n.final.pays.map((p) => `<div class="li small"><div class="grow">${esc(pname(p.from))} pays <b>${esc(pname(p.to))}</b></div><div class="num">${rs(p.amt)}</div></div>`).join('') : '<div class="small mute">Everyone was square</div>'}</div></div>`;
