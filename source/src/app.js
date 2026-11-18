@@ -621,7 +621,9 @@
       ${navBtn('settle', '🧮', 'Settle')}
     </div></div>` : '';
     if (myTurn) banners.unshift(`<div class="yourturn" data-act="tab" data-v="table">🔔 ${actorPid() === S.me.id ? 'YOUR TURN' : esc(nm(actorPid())) + "'S TURN (you play for them)"}</div>`);
-    $app.innerHTML = top + banners.join('') + `<div class="wrap">${body}</div>` + nav + modalView();
+    const inLobby = !S.session || S.session.status === 'closed';
+    const strip = window.WA_LOGO && !inLobby ? `<div class="wa-strip"><img src="${window.WA_LOGO}" alt="Webapprise"></div>` : '';
+    $app.innerHTML = strip + top + banners.join('') + `<div class="wrap">${body}</div>` + nav + modalView();
 
     if (focusKey) {
       const el = $app.querySelector(`[data-bind="${focusKey}"]`);
@@ -635,7 +637,7 @@
   const navBtn = (t, i, l, dot) => `<button data-act="tab" data-v="${t}" class="${S.tab === t ? 'on' : ''}"><span class="i">${i}</span>${l}${dot ? '<span class="dot"></span>' : ''}</button>`;
 
   function lobbyView() {
-    let h = '';
+    let h = window.WA_LOGO ? `<div class="wa-hero"><div class="small">Presented by</div><img src="${window.WA_LOGO}" alt="Webapprise — Get it done"></div>` : '';
     if (S.store.canWrite !== false) {
       h += `<div class="card"><h3>Start a new night</h3>
         <div class="small mute" style="margin-bottom:6px">No game is running. Whoever starts the night becomes its admin, and everyone else who opens the link joins it.</div>

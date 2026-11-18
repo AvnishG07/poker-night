@@ -1,7 +1,9 @@
 import pathlib, sys
 src = pathlib.Path('src')
 css = (src/'styles.css').read_text()
-js = ''.join((src/f).read_text() + '\n' for f in ['engine.js','store.js','app.js'])
+import base64
+logo = 'data:image/png;base64,' + base64.b64encode(pathlib.Path('assets/webapprise-logo.png').read_bytes()).decode()
+js = 'window.WA_LOGO=' + repr(logo) + ';\n' + ''.join((src/f).read_text() + '\n' for f in ['engine.js','store.js','app.js'])
 def page(head_extra=''):
     return f'''<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
