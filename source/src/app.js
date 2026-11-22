@@ -50,7 +50,20 @@
   const isBank = () => !!S.session && S.session.bankId === S.me.id;
   const isPlayer = () => !!S.session && !!S.session.players && !!S.session.players[S.me.id];
   const handLive = () => S.hand && S.session && S.hand.no === S.session.handNo && S.hand.status !== 'done';
-  const pids = () => (S.session ? (S.session.order || []).filter((p) => S.session.players[p] && !S.session.players[p].left) : []);
+  const pids = () => (S.session ? (S.session.order || []).filter((p) => S.session.players[p]) : []);
+  /* ---------- leaving rule: winners must play a minimum number of hands ---------- */
+  const TURN_SECS = 30;
+  function minHands(n) { return n <= 3 ? 60 : n === 4 ? 45 : 35; }
+  function activeCount(s) { return s.order.filter((p) => s.players[p] && !s.players[p].left).length; }
+  function leaveCheck(p) {
+    const s = S.session;
+    const net = E.ledger(s, [p])[p].net;
+    const played = s.appliedHand || 0;
+    const need = minHands(activeCount(s));
+    if (net <= 0 || played >= need) return { ok: true, net, played, need };
+    return { ok: false, net, played, need,
+      msg: `${p === S.me.id ? "You're" : nm(p) + ' is'} up ${rs(net)}. Players in profit can leave only after ${need} hands (${played} played so far).` };
+  }
 
   function toast(msg, err) {
     const t = document.createElement('div');
@@ -173,6 +186,16 @@
       s.order.push(pid);
     });
     S.ui.offName = '';
+  }
+  async function leaveTable(pid) {
+    const c = leaveCheck(pid);
+    if (!c.ok) throw new Error(c.msg);
+    if (handLive() && S.hand.seats.includes(pid) && !S.hand.folded[pid]) throw new Error('Fold or finish this hand first, then leave');
+    await mutateSession((s) => {
+      s.players[pid].left = true; s.players[pid].out = true; s.players[pid].leftAtHand = s.appliedHand || 0;
+      logEntry(s, { t: 'left', p: pid, net: c.net });
+    });
+    toast(nm(pid) + ' left the table');
   }
   async function toggleOut(pid) {
     await mutateSession((s) => { s.players[pid].out = !s.players[pid].out; });
@@ -400,6 +423,7 @@
   }
 
   async function endNight() {
+    if (isPlayer()) { const c = leaveCheck(S.me.id); if (!c.ok) throw new Error(c.msg.replace('can leave', 'can end the night')); }
     // A hand in progress is cancelled: everyone gets back what they put in (dabba included).
     const cur = await S.store.get(handPath());
     let voided = null;
@@ -577,6 +601,10 @@
     S.unsub.push(S.store.onQuery('sessions/' + sid + '/chat', { orderBy: 'ts', dir: 'desc', limit: 50 }, (rows) => { S.chat = rows.reverse(); render(); }, onErr));
   }
   function onHand(d) {
+      if (d && d.status === 'betting' && d.toAct) {
+        const key = d.no + ':' + d.v + ':' + d.toAct;
+        if (!S.turnSeen || S.turnSeen.key !== key) S.turnSeen = { key, at: Date.now(), p: d.toAct, warned: false, fired: false };
+      } else S.turnSeen = null;
       const wasActor = actorPid();
       const prevKey = S.hand && S.hand.no + ':' + S.hand.toAct;
       S.hand = d;
@@ -600,6 +628,42 @@
     } catch (e) {}
   }
   setInterval(pollTable, 6000);
+
+  /* ---------- 30-second turn timer ---------- */
+  function secsLeft() {
+    if (!S.turnSeen || !S.hand || S.hand.status !== 'betting') return null;
+    return Math.max(0, TURN_SECS - Math.floor((Date.now() - S.turnSeen.at) / 1000));
+  }
+  setInterval(() => {
+    const t = secsLeft();
+    if (t == null) return;
+    document.querySelectorAll('[data-tmr]').forEach((el) => { el.textContent = t; el.parentElement.classList.toggle('hurry', t <= 10); });
+    const ts = S.turnSeen;
+    if (t <= 10 && !ts.warned && actorPid()) { ts.warned = true; beep(); }
+    const over = (Date.now() - ts.at) / 1000;
+    // The admin's phone enforces at 30s; any other phone steps in at 45s if the admin's phone is away.
+    if (!ts.fired && ((isAdmin() && over >= TURN_SECS) || over >= TURN_SECS + 15)) { ts.fired = true; run(() => timeoutTurn(ts.key, ts.p)); }
+  }, 1000);
+  async function timeoutTurn(key, p) {
+    const misses = ((S.session && S.session.misses) || {})[p] || 0;
+    let did = null;
+    try {
+      await handAction((h) => {
+        if (h.no + ':' + h.v + ':' + h.toAct !== key) throw new Error('skip');
+        const o = E.options(h, p);
+        did = misses === 0 && o && o.canCheck ? 'check' : 'fold';
+        const x = E.act(h, p, { type: did });
+        const last = x.log[x.log.length - 1]; if (last) last.auto = true;
+        x.undo = null; x.lastActor = null;
+        return x;
+      });
+    } catch (e) { if (e.message === 'skip' || /changed/.test(e.message)) return; throw e; }
+    await mutateSession((s) => { s.misses = s.misses || {}; s.misses[p] = misses + 1; });
+    toast('⏱ ' + nm(p) + ' ran out of time — ' + (did === 'check' ? 'auto-checked' : 'folded'));
+  }
+  async function clearMisses(p) {
+    if (((S.session && S.session.misses) || {})[p]) await mutateSession((s) => { if (s.misses && s.misses[p]) { s.misses[p] = 0; } else return false; });
+  }
   async function refreshAll() {
     if (!S.sid || !S.store || S.store.kind !== 'firebase') return;
     try {
@@ -771,8 +835,9 @@
     const last = [...h.log].reverse().find((e) => e.p === p && e.t !== 'dabba' && e.s === h.street);
     let status = '';
     if (h.folded[p]) status = 'Folded';
-    else if (turn) status = '⏳ Thinking…';
-    else if (last) status = { check: 'Check', call: 'Call', bet: 'Bet', raise: 'Raise', fold: 'Fold' }[last.t] || '';
+    else if (turn) status = `<span class="tmrbox">⏱ <span data-tmr>${secsLeft() ?? TURN_SECS}</span>s</span>`;
+    else if (last) status = (last.auto ? '⏱ ' : '') + ({ check: 'Check', call: 'Call', bet: 'Bet', raise: 'Raise', fold: 'Fold' }[last.t] || '');
+    if (h.folded[p] && last && last.t === 'fold' && last.auto) status = '⏱ Timed out';
     let cards = '';
     if (h.mode === 'online') {
       if (h.shown && h.shown[p]) cards = `<div class="row" style="gap:3px">${h.shown[p].cards.map((c) => cardHTML(c, 'sm')).join('')}</div>`;
@@ -801,6 +866,8 @@
     const word = h.currentBet === 0 ? 'Bet' : 'Raise to';
     return `<div class="act"><div class="card">
       ${theirs ? `<div class="mine" style="margin-bottom:6px">${theirs.map((c) => cardHTML(c, 'sm')).join('')}</div>` : ''}
+      <div class="row" style="margin-bottom:6px"><span class="tmrbig">⏱ <span data-tmr>${secsLeft() ?? TURN_SECS}</span>s</span>
+        <span class="small mute grow" style="margin-left:8px">${((S.session.misses || {})[actor] || 0) ? '<span style="color:var(--red)">Missed last turn — next miss = fold</span>' : 'Out of time: 1st = auto-check, 2nd = fold'}</span></div>
       <div class="row" style="margin-bottom:8px"><b class="grow" style="color:var(--gold)">${forWho}</b>
         <span class="small mute">You have ${rs(o.behind)}${o.roundBet ? ' · in ' + rs(o.roundBet) : ''}${isFinite(o.cap) ? ' · round max ' + rs(o.cap) : ''}</span></div>
       ${o.canRaise ? `
@@ -936,7 +1003,9 @@
       const btns = [];
       if (canBank) btns.push(`<button class="btn sm" data-act="modal" data-m="give" data-v="${esc(p)}">+ Chips</button>`);
       if (p !== S.me.id && isPlayer()) btns.push(`<button class="btn sm" data-act="modal" data-m="lend" data-v="${esc(p)}">Lend</button>`);
-      if (p === S.me.id || isAdmin()) btns.push(`<button class="btn sm ghost" data-act="out" data-v="${esc(p)}">${pl.out ? 'Sit in' : 'Sit out'}</button>`);
+      if (!pl.left && (p === S.me.id || isAdmin())) btns.push(`<button class="btn sm ghost" data-act="out" data-v="${esc(p)}">${pl.out ? 'Sit in' : 'Sit out'}</button>`);
+      if (!pl.left && (p === S.me.id || (isAdmin() && pl.offline))) btns.push(`<button class="btn sm red" data-act="modal" data-m="leave" data-v="${esc(p)}">Leave</button>`);
+      if (pl.left) { btns.length = 0; btns.push('<span class="badge b-off">LEFT</span>'); }
       return `<div class="li" style="flex-wrap:wrap"><div class="grow"><div><b>${esc(pl.name)}</b>${p === s.bankId ? '<span class="badge b-b">BANK</span>' : ''}${p === S.me.id ? '<span class="badge b-me">YOU</span>' : ''}${pl.offline ? '<span class="badge b-off">OFFLINE</span>' : ''}</div>
         <div class="small mute">Chips ${rs(s.stacks[p] || 0)} · from bank ${rs((s.issued || {})[p] || 0)}${pl.out ? ' · sitting out' : ''}</div></div>
         <div class="row" style="gap:4px">${btns.join('')}</div></div>`;
@@ -954,6 +1023,7 @@
         if (e.t === 'issue') t = `🏦 Bank → ${esc(nm(e.p))} <b>${rs(e.a)}</b>`;
         else if (e.t === 'loan') t = `${esc(nm(e.from))} lent ${esc(nm(e.to))} <b>${rs(e.a)}</b>`;
         else if (e.t === 'repay') t = `${esc(nm(e.from))} repaid ${esc(nm(e.to))} <b>${rs(e.a)}</b>`;
+        else if (e.t === 'left') t = `🚪 ${esc(nm(e.p))} left the table (${sgn(e.net)})`;
         else if (e.t === 'void') t = `↩️ Hand #${e.no} cancelled — everyone got their chips back`;
         else if (e.t === 'bank') t = `🎲 ${esc(nm(e.p))} picked as bank`;
         else if (e.t === 'rejudge') t = `🔁 Hand #${e.no} re-checked: ` + Object.entries(e.diff).filter(([, d]) => d).map(([p, d]) => `${esc(nm(p))} ${sgn(d)}`).join(', ');
@@ -1101,7 +1171,14 @@
     const amtPicker = () => `<div class="raiseto" style="margin:10px 0"><div class="v">${rs(S.ui.amt)}</div><button class="btn sm" data-act="amt" data-v="clear">Reset</button></div>
       <div class="row wrapr">${[100, 500, 1000, 2000, 5000].map((a) => `<button class="btn sm" data-act="amt" data-v="${a}">+${a}</button>`).join('')}</div>
       <div class="chips">${E.CHIPS.slice().reverse().map((c) => `<button class="chip c${c}" data-act="amt" data-v="${c}"><span>+${c}</span></button>`).join('')}</div>`;
-    if (m.type === 'cap') {
+    if (m.type === 'leave') {
+      const c = leaveCheck(m.pid);
+      inner = c.ok
+        ? `<h2>Leave the table?</h2><div class="small mute" style="margin-bottom:12px">${esc(nm(m.pid))} is at ${sgn(c.net)} and won't be dealt any more hands tonight. Their result stays in tonight's settlement. This can't be undone.</div>
+           <button class="btn red full" data-act="doLeave" data-v="${esc(m.pid)}">Yes, leave</button>`
+        : `<h2>Can't leave yet</h2><div style="margin:8px 0 12px">${esc(c.msg)}</div>
+           <div class="small mute">Rule: in profit you must play at least 60 hands (3 players), 45 (4 players) or 35 (5+ players). In loss you can leave any time.</div>`;
+    } else if (m.type === 'cap') {
       const s = S.session;
       const last = (s.caps || {})[S.me.id] || 0;
       const N = (s.handNo || 0) + 1;
@@ -1170,10 +1247,13 @@
         }
         render(); return;
       }
-      case 'fold': return run(() => handAction((x) => E.act(x, actorPid(), { type: 'fold' })));
-      case 'check': return run(() => handAction((x) => E.act(x, actorPid(), { type: 'check' })));
-      case 'call': return run(() => handAction((x) => E.act(x, actorPid(), { type: 'call' })));
-      case 'raise': { const t = S.ui.raise; return run(() => handAction((x) => E.act(x, actorPid(), { type: 'raise', total: t }))); }
+      case 'fold': case 'check': case 'call': case 'raise': {
+        const who = actorPid(); const t = S.ui.raise;
+        return run(async () => {
+          await handAction((x) => E.act(x, who, a === 'raise' ? { type: 'raise', total: t } : { type: a }));
+          await clearMisses(who);
+        });
+      }
       case 'change': {
         const who = E.canChange(h, S.me.id) ? S.me.id : h.lastActor;
         return run(() => handAction((x) => E.changeBet(x, who)));
@@ -1190,6 +1270,7 @@
       }
       case 'repay': return run(() => lend(el.dataset.from, el.dataset.to, Number(v), 'repay'));
       case 'modal': S.ui.modal = { type: el.dataset.m, pid: v }; S.ui.amt = 0; render(); return;
+      case 'doLeave': return run(async () => { await leaveTable(v); S.ui.modal = null; render(); });
       case 'closeModal': S.ui.modal = null; render(); return;
       case 'amt': S.ui.amt = v === 'clear' ? 0 : S.ui.amt + Number(v); render(); return;
       case 'doGive': return run(async () => { await giveChips(S.ui.modal.pid, S.ui.amt); S.ui.modal = null; render(); });
