@@ -129,8 +129,17 @@
       handNo: 0, appliedHand: 0, lastDealer: null, moneyLog: [],
     };
     await S.store.set('sessions/' + sid, session);
-    await mutate('config/main', (c) => ({ ...(c || {}), activeSessionId: sid }));
+    let won = false;
+    await mutate('config/main', (c) => {
+      if (c && c.activeSessionId && c.activeSessionId !== sid) return false; // someone else started first
+      won = true;
+      return { ...(c || {}), activeSessionId: sid };
+    });
     S.ui.newNight = '';
+    if (!won) {
+      await S.store.set('sessions/' + sid, { ...session, status: 'cancelled' });
+      toast('A friend started a night just now — joining theirs');
+    }
   }
 
   async function requestJoin() {
@@ -444,6 +453,19 @@
       });
     } catch (e) {}
   }
+  function alertMe(text) {
+    try { navigator.vibrate && navigator.vibrate([150, 80, 150]); } catch (e) {}
+    if (!soundOn) return;
+    beep();
+    try { if (window.speechSynthesis) { const u = new SpeechSynthesisUtterance(text); u.lang = 'en-IN'; setTimeout(() => speechSynthesis.speak(u), 400); } } catch (e) {}
+  }
+  function limitPendingForMe() {
+    const s = S.session;
+    if (!s || s.status !== 'open' || !s.settings || s.settings.game !== 'allin') return false;
+    if (handLive()) return false;
+    if (!isPlayer() || !seatsFor(s).includes(S.me.id)) return false;
+    return capsPending(s).includes(S.me.id);
+  }
   function notifyTurn(pid) {
     S.turnFlash = Date.now();
     try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
@@ -526,7 +548,17 @@
     S.secretSub = null; S.secret = null; S.myHole = null; holeFetch = null;
     if (!sid) { render(); return; }
     S.unsub.push(S.store.onDoc('sessions/' + sid, (d) => {
+      const wasPending = limitPendingForMe();
       S.session = d;
+      if (d && S.announceNight === d.id) {
+        S.announceNight = null;
+        if (d.adminId !== S.me.id) {
+          const host = (d.players[d.adminId] && d.players[d.adminId].name) || 'A friend';
+          toast('🎲 ' + host + ' started "' + d.name + '" — join now!');
+          alertMe(host + ' started a poker night');
+        }
+      }
+      if (!wasPending && limitPendingForMe()) alertMe('Set your all-in limit');
       if (d && d.dealRequest && d.dealRequest.forHand === (d.handNo || 0) + 1 && isAdmin() && !dealingNow) {
         dealingNow = true;
         setTimeout(() => run(async () => {
@@ -620,6 +652,7 @@
       ${navBtn('chat', '💬', 'Chat', unread)}
       ${navBtn('settle', '🧮', 'Settle')}
     </div></div>` : '';
+    if (!myTurn && S.session && limitPendingForMe()) banners.unshift(`<div class="yourturn" data-act="modal" data-m="cap">🔔 SET YOUR ALL-IN LIMIT · HAND #${(S.session.handNo || 0) + 1}</div>`);
     if (myTurn) banners.unshift(`<div class="yourturn" data-act="tab" data-v="table">🔔 ${actorPid() === S.me.id ? 'YOUR TURN' : esc(nm(actorPid())) + "'S TURN (you play for them)"}</div>`);
     const inLobby = !S.session || S.session.status === 'closed';
     const strip = window.WA_LOGO && !inLobby ? `<div class="wa-strip"><img src="${window.WA_LOGO}" alt="Webapprise"></div>` : '';
@@ -857,9 +890,11 @@
         h += `<div class="card" style="${mine === undefined ? 'border-color:var(--gold)' : ''}"><h3>My all-in limit · hand #${N}</h3>
           ${mine === undefined ? `<div class="small" style="color:var(--gold)">Set your limit — the hand can't start until everyone has.</div>` : `<div class="small">Set: <b>${mine ? rs(mine) : 'No limit'}</b> — you can still change it.</div>`}
           <div class="small mute" style="margin-top:4px">You have ${rs(s.stacks[S.me.id] || 0)}. This is the most you'll risk this hand.</div>
-          <div class="row" style="margin-top:8px"><input class="in grow" type="number" inputmode="numeric" step="10" min="0" placeholder="e.g. 2000" data-bind="cap" value="${esc(S.ui.cap != null ? S.ui.cap : (mine || ''))}">
-          <button class="btn gold" data-act="setCap">Set</button></div>
-          <div class="row" style="margin-top:6px"><button class="btn sm grow" data-act="capNone">No limit</button>${last ? `<button class="btn sm grow" data-act="capSame" data-v="${last}">Same as last (${rs(last)})</button>` : ''}</div></div>`;
+          ${mine === undefined ? `<button class="btn gold full" style="margin-top:10px;font-size:16px" data-act="capSame" data-v="${last}">✔ Confirm ${last ? rs(last) : 'No limit'}${last || (s.caps && S.me.id in s.caps) ? ' (same as last)' : ''}</button>` : ''}
+          <label class="lb">Or set a different amount</label>
+          <div class="row"><input class="in grow" type="number" inputmode="numeric" step="10" min="0" placeholder="e.g. 2000" data-bind="cap" value="${esc(S.ui.cap != null ? S.ui.cap : (mine !== undefined ? (mine || '') : (last || '')))}">
+          <button class="btn" data-act="setCap">Set</button></div>
+          <div class="row" style="margin-top:6px"><button class="btn sm grow" data-act="capNone">No limit</button></div></div>`;
       }
       const list = seatsFor(s);
       if (list.length) h += `<div class="card"><h3>Limits for hand #${N}</h3><div class="list">${list.map((p) => {
@@ -992,8 +1027,13 @@
     render(); window.scrollTo(0, 0);
   }
   function pastNightsView() {
-    const past = S.nights.filter((n) => n.status === 'closed').slice(0, 10);
-    const n = S.ui.viewNight && past.find((x) => x.id === S.ui.viewNight);
+    const cutoff = Date.now() - 92 * 24 * 3600 * 1000; // about 3 months
+    const all = S.nights.filter((n) => n.status === 'closed' && (n.createdAt || 0) >= cutoff);
+    const showN = S.ui.pastShow || 10;
+    const past = all.slice(0, showN);
+    const oldest = S.nights.length ? S.nights[S.nights.length - 1].createdAt || 0 : 0;
+    const maybeMore = all.length > showN || (S.nights.length >= S.nightsLimit && oldest >= cutoff);
+    const n = S.ui.viewNight && all.find((x) => x.id === S.ui.viewNight);
     if (n) {
       const pname = (p) => (n.players && n.players[p] && n.players[p].name) || 'Player';
       let h = `<div class="card"><div class="row"><button class="btn sm" data-act="viewNight" data-v="">← All nights</button><div class="grow"></div></div>
@@ -1006,12 +1046,12 @@
       h += `<div class="card"><h3>Hand by hand</h3>${S.pastHands == null ? '<div class="empty">Loading…</div>' : S.pastHands.length ? `<div class="list">${handRows(S.pastHands, pname)}</div>` : '<div class="small mute">No hands were played</div>'}</div>`;
       return h;
     }
-    if (!past.length) return `<div class="card empty">No finished nights yet</div>`;
-    return `<div class="card"><h3>Past nights (last 10)</h3><div class="list">` + past.map((x) => {
+    if (!past.length) return `<div class="card empty">No finished nights in the last 3 months</div>`;
+    return `<div class="card"><h3>Past nights · last 3 months</h3><div class="list">` + past.map((x) => {
       const me = x.final && x.final.rows && x.final.rows[S.me.id];
       return `<div class="li"><div class="grow"><div><b>${esc(x.name)}</b></div><div class="small mute">${new Date(x.createdAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })} · ${x.handNo || 0} hands${me ? ` · you <span class="${me.net > 0 ? 'pos' : me.net < 0 ? 'neg' : ''}">${sgn(me.net)}</span>` : ''}</div></div>
         <button class="btn sm" data-act="viewNight" data-v="${esc(x.id)}">Open</button></div>`;
-    }).join('') + `</div></div>`;
+    }).join('') + `</div>${maybeMore ? `<button class="btn full" style="margin-top:10px" data-act="moreNights">Load more</button>` : `<div class="small mute" style="margin-top:8px;text-align:center">Showing all nights from the last 3 months</div>`}</div>`;
   }
 
   function handsView() {
@@ -1061,7 +1101,16 @@
     const amtPicker = () => `<div class="raiseto" style="margin:10px 0"><div class="v">${rs(S.ui.amt)}</div><button class="btn sm" data-act="amt" data-v="clear">Reset</button></div>
       <div class="row wrapr">${[100, 500, 1000, 2000, 5000].map((a) => `<button class="btn sm" data-act="amt" data-v="${a}">+${a}</button>`).join('')}</div>
       <div class="chips">${E.CHIPS.slice().reverse().map((c) => `<button class="chip c${c}" data-act="amt" data-v="${c}"><span>+${c}</span></button>`).join('')}</div>`;
-    if (m.type === 'give') {
+    if (m.type === 'cap') {
+      const s = S.session;
+      const last = (s.caps || {})[S.me.id] || 0;
+      const N = (s.handNo || 0) + 1;
+      inner = `<h2>Your all-in limit · hand #${N}</h2><div class="small mute">You have ${rs(s.stacks[S.me.id] || 0)}. This is the most you'll risk this hand.</div>
+        <button class="btn gold full" style="margin:14px 0 8px;font-size:17px;min-height:54px" data-act="capSameClose" data-v="${last}">✔ ${last ? rs(last) : 'No limit'}${last ? ' (same as last)' : ''}</button>
+        <label class="lb">Or type a different amount</label>
+        <div class="row"><input class="in grow" type="number" inputmode="numeric" step="10" min="0" data-bind="cap" value="${esc(S.ui.cap != null ? S.ui.cap : (last || ''))}"><button class="btn" data-act="setCapClose">Set</button></div>
+        <button class="btn full" style="margin-top:8px" data-act="capNoneClose">No limit</button>`;
+    } else if (m.type === 'give') {
       inner = `<h2>🏦 Bank gives chips to ${esc(nm(m.pid))}</h2><div class="small mute">${esc(nm(m.pid))} will owe the bank this amount.</div>${amtPicker()}
         <button class="btn gold full" data-act="doGive">Give ${rs(S.ui.amt)}</button>`;
     } else if (m.type === 'lend') {
@@ -1102,6 +1151,9 @@
       case 'pickBank': return run(pickBank);
       case 'setCap': return run(async () => { await setCap(S.ui.cap); S.ui.cap = null; });
       case 'capNone': return run(async () => { await setCap(0); S.ui.cap = null; });
+      case 'capSameClose': return run(async () => { await setCap(Number(v)); S.ui.cap = null; S.ui.modal = null; render(); });
+      case 'setCapClose': return run(async () => { await setCap(S.ui.cap); S.ui.cap = null; S.ui.modal = null; render(); });
+      case 'capNoneClose': return run(async () => { await setCap(0); S.ui.cap = null; S.ui.modal = null; render(); });
       case 'capSame': return run(async () => { await setCap(Number(v)); S.ui.cap = null; });
       case 'setting': if (el.dataset.k === 'mode') return; return run(() => saveSettings({ [el.dataset.k]: el.dataset.k === 'lastLimit' ? Number(v) : v }));
       case 'deal': return run(requestDeal);
@@ -1145,9 +1197,20 @@
       case 'doEnd': return run(async () => { const id = S.sid; await endNight(); S.ui.modal = null; S.tab = 'table'; S.ui.endedId = id; render(); });
       case 'send': return run(sendChat);
       case 'viewNight': openNight(v || null); return;
+      case 'moreNights': {
+        S.ui.pastShow = (S.ui.pastShow || 10) + 10;
+        if (S.nightsLimit < S.ui.pastShow + 2) { S.nightsLimit = S.ui.pastShow + 11; subscribeNights(); }
+        render(); return;
+      }
       case 'handsTab': S.ui.handsTab = v; if (v === 'tonight') openNight(null); else render(); return;
     }
   });
+
+  S.nightsLimit = 21;
+  function subscribeNights() {
+    if (S.nightsUnsub) { try { S.nightsUnsub(); } catch (e) {} }
+    S.nightsUnsub = S.store.onQuery('sessions', { orderBy: 'createdAt', dir: 'desc', limit: S.nightsLimit }, (rows) => { S.nights = rows; render(); }, onErr);
+  }
 
   /* ---------- boot ---------- */
   (async function boot() {
@@ -1168,12 +1231,14 @@
       const sid = c && c.activeSessionId;
       if (sid !== S.sid) {
         const ended = S.sid;
+        if (sid && !ended && S.cfgSeen) S.announceNight = sid; // started while this page was open
         subscribeSession(sid);
         if (!sid && ended) openNight(ended); // night just ended → show its final result
       }
       else render();
+      S.cfgSeen = true;
     }, onErr);
-    S.store.onQuery('sessions', { orderBy: 'createdAt', dir: 'desc', limit: 25 }, (rows) => { S.nights = rows; render(); }, onErr);
+    subscribeNights();
     render();
   })();
 })();
