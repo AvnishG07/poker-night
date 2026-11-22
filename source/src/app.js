@@ -189,7 +189,7 @@
   }
   async function leaveTable(pid) {
     const c = leaveCheck(pid);
-    if (!c.ok) throw new Error(c.msg);
+    if (!c.ok) return;
     if (handLive() && S.hand.seats.includes(pid) && !S.hand.folded[pid]) throw new Error('Fold or finish this hand first, then leave');
     await mutateSession((s) => {
       s.players[pid].left = true; s.players[pid].out = true; s.players[pid].leftAtHand = s.appliedHand || 0;
@@ -423,7 +423,7 @@
   }
 
   async function endNight() {
-    if (isPlayer()) { const c = leaveCheck(S.me.id); if (!c.ok) throw new Error(c.msg.replace('can leave', 'can end the night')); }
+    if (isPlayer() && !leaveCheck(S.me.id).ok) return;
     // A hand in progress is cancelled: everyone gets back what they put in (dabba included).
     const cur = await S.store.get(handPath());
     let voided = null;
@@ -1004,7 +1004,7 @@
       if (canBank) btns.push(`<button class="btn sm" data-act="modal" data-m="give" data-v="${esc(p)}">+ Chips</button>`);
       if (p !== S.me.id && isPlayer()) btns.push(`<button class="btn sm" data-act="modal" data-m="lend" data-v="${esc(p)}">Lend</button>`);
       if (!pl.left && (p === S.me.id || isAdmin())) btns.push(`<button class="btn sm ghost" data-act="out" data-v="${esc(p)}">${pl.out ? 'Sit in' : 'Sit out'}</button>`);
-      if (!pl.left && (p === S.me.id || (isAdmin() && pl.offline))) btns.push(`<button class="btn sm red" data-act="modal" data-m="leave" data-v="${esc(p)}">Leave</button>`);
+      if (!pl.left && (p === S.me.id || (isAdmin() && pl.offline)) && leaveCheck(p).ok) btns.push(`<button class="btn sm red" data-act="modal" data-m="leave" data-v="${esc(p)}">Leave</button>`);
       if (pl.left) { btns.length = 0; btns.push('<span class="badge b-off">LEFT</span>'); }
       return `<div class="li" style="flex-wrap:wrap"><div class="grow"><div><b>${esc(pl.name)}</b>${p === s.bankId ? '<span class="badge b-b">BANK</span>' : ''}${p === S.me.id ? '<span class="badge b-me">YOU</span>' : ''}${pl.offline ? '<span class="badge b-off">OFFLINE</span>' : ''}</div>
         <div class="small mute">Chips ${rs(s.stacks[p] || 0)} · from bank ${rs((s.issued || {})[p] || 0)}${pl.out ? ' · sitting out' : ''}</div></div>
@@ -1160,7 +1160,7 @@
     let h = `<div class="card"><h3>Where everyone stands</h3>${finalTable(rows, s.players)}
       <div class="small mute" style="margin-top:8px">Net = chips now − taken from bank − borrowed + lent.</div></div>`;
     h += `<div class="card"><h3>If we stopped now</h3>${pays.length ? `<div class="list">${pays.map((p) => `<div class="li"><div class="grow">${esc(nm(p.from))} pays <b>${esc(nm(p.to))}</b></div><div class="num">${rs(p.amt)}</div></div>`).join('')}</div>` : '<div class="small mute">Everyone is square</div>'}</div>`;
-    if (isAdmin() || isPlayer()) h += `<button class="btn red full" data-act="modal" data-m="end">End the night & see final result</button>`;
+    if ((isAdmin() || isPlayer()) && (!isPlayer() || leaveCheck(S.me.id).ok)) h += `<button class="btn red full" data-act="modal" data-m="end">End the night & see final result</button>`;
     return h;
   }
 
@@ -1176,8 +1176,7 @@
       inner = c.ok
         ? `<h2>Leave the table?</h2><div class="small mute" style="margin-bottom:12px">${esc(nm(m.pid))} is at ${sgn(c.net)} and won't be dealt any more hands tonight. Their result stays in tonight's settlement. This can't be undone.</div>
            <button class="btn red full" data-act="doLeave" data-v="${esc(m.pid)}">Yes, leave</button>`
-        : `<h2>Can't leave yet</h2><div style="margin:8px 0 12px">${esc(c.msg)}</div>
-           <div class="small mute">Rule: in profit you must play at least 60 hands (3 players), 45 (4 players) or 35 (5+ players). In loss you can leave any time.</div>`;
+        : '';
     } else if (m.type === 'cap') {
       const s = S.session;
       const last = (s.caps || {})[S.me.id] || 0;
