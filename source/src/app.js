@@ -674,7 +674,17 @@
     await refreshAll();
     const d = S.hand; if (d && needMyHole()) { holeFetch = null; fetchMyHole(d.no); }
   }
-  setInterval(pollTable, 6000);
+  // Automatic refresh every 10 seconds: re-reads the table, players and your cards
+  // in the background (no page reload, so nothing you're typing is lost).
+  async function autoRefresh() {
+    if (!S.sid || document.hidden || !S.store || S.store.kind !== 'firebase') return;
+    try {
+      const sd = await S.store.get(sessPath());
+      if (sd && JSON.stringify(sd) !== JSON.stringify(S.session)) { S.session = sd; render(); }
+    } catch (e) {}
+    await pollTable();
+  }
+  setInterval(autoRefresh, 10000);
 
   /* ---------- 30-second turn timer ---------- */
   function secsLeft() {
