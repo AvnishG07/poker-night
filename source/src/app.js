@@ -221,6 +221,22 @@
     });
     toast(nm(pid) + ' left the table');
   }
+  // Admin: remove a player from the night at any time (no profit rule). If they're in a hand, they fold.
+  async function removePlayer(pid) {
+    if (!isAdmin()) return;
+    if (handLive() && S.hand.seats.includes(pid) && !S.hand.folded[pid]) {
+      await handAction((h) => { const r = E.removeFromHand(h, pid); if (!r) throw new Error('skip'); return r; }, { ignoreV: true })
+        .catch((e) => { if (e.message !== 'skip') throw e; });
+    }
+    const net = E.ledger(S.session, [pid])[pid].net;
+    await mutateSession((s) => {
+      if (!s.players[pid]) return false;
+      s.players[pid].left = true; s.players[pid].out = true; s.players[pid].leftAtHand = s.appliedHand || 0; s.players[pid].removed = true;
+      if (s.requests) delete s.requests[pid];
+      logEntry(s, { t: 'removed', p: pid, net });
+    });
+    toast(nm(pid) + ' removed from the night');
+  }
   async function toggleOut(pid) {
     await mutateSession((s) => { s.players[pid].out = !s.players[pid].out; });
   }
@@ -453,7 +469,7 @@
   }
 
   async function endNight() {
-    if (isPlayer() && !leaveCheck(S.me.id).ok) return;
+    if (!isAdmin() && isPlayer() && !leaveCheck(S.me.id).ok) return;
     // A hand in progress is cancelled: everyone gets back what they put in (dabba included).
     const cur = await S.store.get(handPath());
     let voided = null;
@@ -1064,7 +1080,8 @@
       if (canBank) btns.push(`<button class="btn sm" data-act="modal" data-m="give" data-v="${esc(p)}">+ Chips</button>`);
       if (p !== S.me.id && isPlayer()) btns.push(`<button class="btn sm" data-act="modal" data-m="lend" data-v="${esc(p)}">Lend</button>`);
       if (!pl.left && (p === S.me.id || isAdmin())) btns.push(`<button class="btn sm ghost" data-act="out" data-v="${esc(p)}">${pl.out ? 'Sit in' : 'Sit out'}</button>`);
-      if (!pl.left && (p === S.me.id || (isAdmin() && pl.offline)) && leaveCheck(p).ok) btns.push(`<button class="btn sm red" data-act="modal" data-m="leave" data-v="${esc(p)}">Leave</button>`);
+      if (!pl.left && isAdmin() && p !== S.me.id) btns.push(`<button class="btn sm red" data-act="modal" data-m="remove" data-v="${esc(p)}">Remove</button>`);
+      if (!pl.left && p === S.me.id && leaveCheck(p).ok) btns.push(`<button class="btn sm red" data-act="modal" data-m="leave" data-v="${esc(p)}">Leave</button>`);
       if (pl.left) { btns.length = 0; btns.push('<span class="badge b-off">LEFT</span>'); }
       return `<div class="li" style="flex-wrap:wrap"><div class="grow"><div><b>${esc(pl.name)}</b>${p === s.bankId ? '<span class="badge b-b">BANK</span>' : ''}${p === S.me.id ? '<span class="badge b-me">YOU</span>' : ''}${pl.offline ? '<span class="badge b-off">OFFLINE</span>' : ''}</div>
         <div class="small mute">Chips ${rs(s.stacks[p] || 0)} · from bank ${rs((s.issued || {})[p] || 0)}${pl.out ? ' · sitting out' : ''}</div></div>
@@ -1083,6 +1100,7 @@
         if (e.t === 'issue') t = `🏦 Bank → ${esc(nm(e.p))} <b>${rs(e.a)}</b>`;
         else if (e.t === 'loan') t = `${esc(nm(e.from))} lent ${esc(nm(e.to))} <b>${rs(e.a)}</b>`;
         else if (e.t === 'repay') t = `${esc(nm(e.from))} repaid ${esc(nm(e.to))} <b>${rs(e.a)}</b>`;
+        else if (e.t === 'removed') t = `🚫 ${esc(nm(e.p))} removed by admin (${sgn(e.net)})`;
         else if (e.t === 'left') t = `🚪 ${esc(nm(e.p))} left the table (${sgn(e.net)})`;
         else if (e.t === 'void') t = `↩️ Hand #${e.no} cancelled — everyone got their chips back`;
         else if (e.t === 'bank') t = `🎲 ${esc(nm(e.p))} picked as bank`;
@@ -1220,7 +1238,7 @@
     let h = `<div class="card"><h3>Where everyone stands</h3>${finalTable(rows, s.players)}
       <div class="small mute" style="margin-top:8px">Net = chips now − taken from bank − borrowed + lent.</div></div>`;
     h += `<div class="card"><h3>If we stopped now</h3>${pays.length ? `<div class="list">${pays.map((p) => `<div class="li"><div class="grow">${esc(nm(p.from))} pays <b>${esc(nm(p.to))}</b></div><div class="num">${rs(p.amt)}</div></div>`).join('')}</div>` : '<div class="small mute">Everyone is square</div>'}</div>`;
-    if ((isAdmin() || isPlayer()) && (!isPlayer() || leaveCheck(S.me.id).ok)) h += `<button class="btn red full" data-act="modal" data-m="end">End the night & see final result</button>`;
+    if (isAdmin() || (isPlayer() && leaveCheck(S.me.id).ok)) h += `<button class="btn red full" data-act="modal" data-m="end">End the night & see final result</button>`;
     return h;
   }
 
@@ -1231,7 +1249,11 @@
     const amtPicker = () => `<div class="raiseto" style="margin:10px 0"><div class="v">${rs(S.ui.amt)}</div><button class="btn sm" data-act="amt" data-v="clear">Reset</button></div>
       <div class="row wrapr">${[100, 500, 1000, 2000, 5000].map((a) => `<button class="btn sm" data-act="amt" data-v="${a}">+${a}</button>`).join('')}</div>
       <div class="chips">${E.CHIPS.slice().reverse().map((c) => `<button class="chip c${c}" data-act="amt" data-v="${c}"><span>+${c}</span></button>`).join('')}</div>`;
-    if (m.type === 'leave') {
+    if (m.type === 'remove') {
+      const inHand = handLive() && S.hand.seats.includes(m.pid) && !S.hand.folded[m.pid];
+      inner = `<h2>Remove ${esc(nm(m.pid))} from the night?</h2><div class="small mute" style="margin-bottom:12px">They won't be dealt any more hands. Their chips and loans stay in tonight's settlement.${inHand ? ' <b>They are in the current hand and will fold now</b> — chips already in the pot stay there.' : ''} This can't be undone.</div>
+        <button class="btn red full" data-act="doRemove" data-v="${esc(m.pid)}">Yes, remove</button>`;
+    } else if (m.type === 'leave') {
       const c = leaveCheck(m.pid);
       inner = c.ok
         ? `<h2>Leave the table?</h2><div class="small mute" style="margin-bottom:12px">${esc(nm(m.pid))} is at ${sgn(c.net)} and won't be dealt any more hands tonight. Their result stays in tonight's settlement. This can't be undone.</div>
@@ -1331,6 +1353,7 @@
       }
       case 'repay': return run(() => lend(el.dataset.from, el.dataset.to, Number(v), 'repay'));
       case 'modal': S.ui.modal = { type: el.dataset.m, pid: v }; S.ui.amt = 0; render(); return;
+      case 'doRemove': return run(async () => { await removePlayer(v); S.ui.modal = null; render(); });
       case 'doLeave': return run(async () => { await leaveTable(v); S.ui.modal = null; render(); });
       case 'closeModal': S.ui.modal = null; render(); return;
       case 'amt': S.ui.amt = v === 'clear' ? 0 : S.ui.amt + Number(v); render(); return;

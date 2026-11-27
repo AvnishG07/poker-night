@@ -185,3 +185,15 @@ console.log('mid-hand checks ok');
   ok(s2.cards.filter((c) => ['5h','2s'].includes(c)).length <= 1, 'max one river card used');
   console.log('one-river rule ok');
 }
+
+{
+  let h = E.startHand({ no: 70, game: 'allin', mode: 'online', seats: ['A','B','C'], dealer: 'C', stacks: { A: 500, B: 500, C: 500 } });
+  h = E.act(h, 'A', { type: 'raise', total: 100 });
+  let x = E.removeFromHand(h, 'B'); // B to act
+  ok(x.folded.B && x.toAct === 'C', 'remove current actor moves turn');
+  x = E.removeFromHand(h, 'C'); // not their turn
+  ok(x.folded.C && x.toAct === 'B', 'remove other player keeps turn');
+  x = E.removeFromHand(E.removeFromHand(h, 'C'), 'B');
+  ok(x.status === 'done' && x.result.payout.A === 200, 'last player standing wins');
+  console.log('remove ok');
+}

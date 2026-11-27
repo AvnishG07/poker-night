@@ -488,6 +488,22 @@
     return h;
   }
 
+  /** Remove a player from a running hand (admin): they fold right away, their bets stay in the pot. */
+  function removeFromHand(hand, p) {
+    if (!hand || hand.status !== 'betting' && hand.status !== 'dealing' && hand.status !== 'showdown' && hand.status !== 'reveal') return null;
+    if (!hand.seats.includes(p) || hand.folded[p]) return null;
+    const h = clone(hand);
+    h.folded[p] = true;
+    h.log.push({ t: 'fold', p, s: h.street, removed: true });
+    h.undo = null; h.lastActor = null;
+    h.v = (hand.v || 0) + 1;
+    const live = liveList(h);
+    if (live.length === 1) return finish(h, [{ amt: potTotal(h), eligible: live, winners: live }], 'fold');
+    if (h.status === 'showdown') { h.pots = potsFor(h); return h; }
+    if (h.status === 'betting' && h.toAct === p) return advance(h, p);
+    return h;
+  }
+
   function myHole(h, p) {
     if (h.mode !== 'online' || !h.secret) return null;
     const s = unseal(h.secret, h.key);
@@ -557,7 +573,7 @@
   const Engine = {
     RANKS, CHIPS, STREETS, GAMES, DABBA, limitsFor,
     newDeck, shuffle, eval5, bestHand, bestFor, rejudge, cmp, chipBreakdown, buildPots, splitPot,
-    startHand, adjustInHand, options, act, canChange, changeBet, resolveShowdown, resume, myHole, seal, unseal, potTotal,
+    startHand, adjustInHand, removeFromHand, options, act, canChange, changeBet, resolveShowdown, resume, myHole, seal, unseal, potTotal,
     liveList, canActList, ledger, settleUp, openLoans, pickBank,
   };
   root.PokerEngine = Engine;
