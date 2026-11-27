@@ -177,6 +177,30 @@
       }
     });
   }
+  // A friend who opens the link on a new phone/browser gets a new ID. The admin links it to their existing seat.
+  async function relink(newId, oldId) {
+    const swap = (o) => JSON.parse(JSON.stringify(o).split('"' + oldId + '"').join('"' + newId + '"'));
+    await mutateSession((s) => {
+      const r = s.requests && s.requests[newId];
+      if (!r || !s.players[oldId] || s.players[newId]) return false;
+      delete s.requests[newId];
+      const x = swap(s);
+      x.players[newId].uid = newId; x.players[newId].offline = false;
+      return x;
+    });
+    await mutate(handPath(), (h) => (h && JSON.stringify(h).includes(oldId) ? swap(h) : false));
+    if (split() && isAdmin()) {
+      const sec = await S.store.get(secretPath());
+      const h = await S.store.get(handPath());
+      if (sec && h && sec.no === h.no && h.seats.includes(newId)) {
+        const all = E.unseal(sec.secret, sec.key);
+        const fixed = { ...all, holes: swap(all.holes) };
+        await S.store.set(secretPath(), { ...sec, secret: E.seal(fixed, sec.key) });
+        await S.store.set(holePath(newId), { uid: newId, cards: fixed.holes[newId], no: h.no });
+      }
+    }
+    toast('Linked — ' + nm(newId) + ' is back in their seat');
+  }
   async function addOffline() {
     const n = (S.ui.offName || '').trim();
     if (!n) throw new Error('Type a name');
@@ -384,14 +408,20 @@
   async function fetchMyHole(no) {
     if (holeFetch === no) return;
     holeFetch = no;
-    for (let i = 0; i < 6; i++) {
+    // Keep trying while this hand is running (weak network / slow phone).
+    for (let i = 0; i < 60; i++) {
+      if (!S.hand || S.hand.no !== no || S.hand.status === 'done') break;
       try {
         const d = await S.store.get(holePath(S.me.id));
-        if (d && d.no === no) { S.myHole = d; render(); return; }
+        if (d && d.no === no) { S.myHole = d; render(); holeFetch = null; return; }
       } catch (e) {}
-      await new Promise((r) => setTimeout(r, 700));
+      await new Promise((r) => setTimeout(r, i < 5 ? 800 : 2000));
     }
     holeFetch = null;
+  }
+  function needMyHole() {
+    const d = S.hand;
+    return d && split() && d.mode === 'online' && d.seats.includes(S.me.id) && d.status !== 'done' && !(S.myHole && S.myHole.no === d.no);
   }
 
   async function applyResult(h) {
@@ -611,7 +641,7 @@
       const nowActor = actorPid();
       if (nowActor && (nowActor !== wasActor || prevKey !== d.no + ':' + d.toAct)) notifyTurn(nowActor);
       // Fallback: if a finished hand wasn't settled (someone's phone dropped), the admin settles it.
-      if (d && split() && d.mode === 'online' && d.seats.includes(S.me.id) && d.status !== 'done' && !(S.myHole && S.myHole.no === d.no)) fetchMyHole(d.no);
+      if (needMyHole()) fetchMyHole(d.no);
       if (d && split() && isAdmin() && (d.status === 'dealing' || d.status === 'reveal')) setTimeout(() => run(hostResume), 300);
       clearTimeout(S.applyTimer);
       if (d && d.status === 'done' && S.session && (S.session.appliedHand || 0) < d.no && isAdmin()) {
@@ -624,8 +654,25 @@
     if (!S.sid || document.hidden || !S.store || S.store.kind !== 'firebase') return;
     try {
       const d = await S.store.get(handPath());
-      if (d && (!S.hand || d.no !== S.hand.no || d.v !== S.hand.v || d.status !== S.hand.status)) onHand(d);
+      if (d && (!S.hand || d.no !== S.hand.no || d.v !== S.hand.v || d.status !== S.hand.status)) {
+        S.stalls = (S.stalls || 0) + 1;
+        onHand(d);
+        if (S.stalls >= 2) { S.stalls = 0; resubscribe(); } // live updates stuck on this phone → reconnect
+      } else S.stalls = 0;
     } catch (e) {}
+    if (needMyHole()) fetchMyHole(S.hand.no);
+  }
+  function resubscribe() {
+    const sid = S.sid; if (!sid) return;
+    const keepHole = S.myHole;
+    subscribeSession(sid);
+    S.myHole = keepHole;
+  }
+  async function hardRefresh() {
+    toast('Refreshing…');
+    resubscribe();
+    await refreshAll();
+    const d = S.hand; if (d && needMyHole()) { holeFetch = null; fetchMyHole(d.no); }
   }
   setInterval(pollTable, 6000);
 
@@ -705,7 +752,7 @@
     else if (S.tab === 'chat') body = chatView();
     else if (S.tab === 'settle') body = settleView();
 
-    const top = `<div class="top"><div class="brand">♠ Poker <b>Night</b></div><button class="btn sm ghost" data-act="sound" title="Turn alerts">${soundOn ? '🔊' : '🔇'}</button><div class="sub">${S.session && S.session.status === 'open' ? esc(S.session.name) + ' · ' + (S.session.settings.mode === 'online' ? 'online' : 'real cards') + '<br>' + hostLine(S.session) + '<br>' : ''}${esc(S.me.name || '')}${S.session && isAdmin() ? ' · admin' : ''}</div></div>`;
+    const top = `<div class="top"><div class="brand">♠ Poker <b>Night</b></div><button class="btn sm ghost" data-act="sound" title="Turn alerts">${soundOn ? '🔊' : '🔇'}</button>${S.sid ? '<button class="btn sm ghost" data-act="refresh" title="Refresh table">↻</button>' : ''}<div class="sub">${S.session && S.session.status === 'open' ? esc(S.session.name) + ' · ' + (S.session.settings.mode === 'online' ? 'online' : 'real cards') + '<br>' + hostLine(S.session) + '<br>' : ''}${esc(S.me.name || '')}${S.session && isAdmin() ? ' · admin' : ''}</div></div>`;
     const showNav = S.session && S.session.status === 'open' && (isPlayer() || isAdmin());
     const unread = S.chat.length && S.chat[S.chat.length - 1].ts > S.lastSeenChat && S.tab !== 'chat' && S.chat[S.chat.length - 1].by !== S.me.id;
     const myTurn = S.hand && S.hand.status === 'betting' && actorPid();
@@ -994,7 +1041,10 @@
     // Requests
     const reqs = Object.entries(s.requests || {});
     if (isAdmin() && reqs.length) {
-      h += `<div class="card"><h3>Want to join</h3><div class="list">${reqs.map(([uid, r]) => `<div class="li"><div class="grow">${esc(r.name)}</div><button class="btn sm" data-act="approve" data-v="${esc(uid)}" data-yes="0">Ignore</button><button class="btn sm gold" data-act="approve" data-v="${esc(uid)}" data-yes="1">Add</button></div>`).join('')}</div></div>`;
+      const seated = pids().filter((p) => !s.players[p].left);
+      h += `<div class="card"><h3>Want to join</h3><div class="list">${reqs.map(([uid, r]) => `<div class="li" style="flex-wrap:wrap"><div class="grow"><b>${esc(r.name)}</b></div><button class="btn sm" data-act="approve" data-v="${esc(uid)}" data-yes="0">Ignore</button><button class="btn sm gold" data-act="approve" data-v="${esc(uid)}" data-yes="1">Add as new</button>
+        <div style="width:100%;margin-top:6px" class="small mute">Same person on a new phone? Link to their seat:</div>
+        <div class="row wrapr" style="width:100%">${seated.map((p) => `<button class="btn sm ${s.players[p].name.toLowerCase() === r.name.toLowerCase() ? 'gold' : ''}" data-act="relink" data-v="${esc(uid)}" data-old="${esc(p)}">${esc(s.players[p].name)}</button>`).join('')}</div></div>`).join('')}</div></div>`;
     }
     // Players
     const canBank = isAdmin() || isBank();
@@ -1214,6 +1264,7 @@
     const a = el.dataset.act, v = el.dataset.v;
     const h = S.hand;
     switch (a) {
+      case 'refresh': return run(hardRefresh);
       case 'mic': toggleMic(); return; // must run synchronously in the click
       case 'sound': soundOn = !soundOn; try { localStorage.setItem('poker-sound', soundOn ? 'on' : 'off'); } catch (e) {} toast(soundOn ? 'Turn alerts on 🔊' : 'Turn alerts muted (vibration only)'); if (soundOn) { unlockAudio(); beep(); } render(); return;
       case 'rec': return run(toggleRecord);
@@ -1221,6 +1272,7 @@
       case 'startNight': return run(startNight);
       case 'newMode': S.ui.newMode = v; render(); return;
       case 'join': return run(requestJoin);
+      case 'relink': return run(() => relink(v, el.dataset.old));
       case 'approve': return run(() => approve(v, el.dataset.yes === '1'));
       case 'addOffline': return run(addOffline);
       case 'out': return run(() => toggleOut(v));
