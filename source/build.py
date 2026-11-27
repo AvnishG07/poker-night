@@ -19,7 +19,18 @@ def page(head_extra=''):
 <script>{js}</script></body></html>'''
 pathlib.Path('index.html').write_text(page())
 V='10.12.2'
-fb = ''.join(f'<script src="https://www.gstatic.com/firebasejs/{V}/{m}.js"></script>\n' for m in ['firebase-app-compat','firebase-auth-compat','firebase-firestore-compat'])
+# Load Firebase from Google; if that fails on a phone, try a second source.
+fb = '''<script>
+window.firebaseReady = (function () {
+  var V = '%s', mods = ['firebase-app-compat', 'firebase-auth-compat', 'firebase-firestore-compat'];
+  var srcs = [function (m) { return 'https://www.gstatic.com/firebasejs/' + V + '/' + m + '.js'; },
+              function (m) { return 'https://cdn.jsdelivr.net/npm/firebase@' + V + '/' + m + '.js'; }];
+  function load(u) { return new Promise(function (res, rej) { var s = document.createElement('script'); s.src = u; s.onload = res; s.onerror = rej; document.head.appendChild(s); }); }
+  async function all(i) { for (var k = 0; k < mods.length; k++) await load(srcs[i](mods[k])); }
+  return all(0).catch(function () { return all(1); }).then(function () { return true; }, function () { return false; });
+})();
+</script>
+''' % V
 cfg = (pathlib.Path('firebase')/'config.js').read_text()
 d = pathlib.Path('dist'); d.mkdir(exist_ok=True)
 (d/'index.html').write_text(page(fb + '<script>' + cfg + '</script>'))

@@ -138,7 +138,9 @@
   }
 
   async function createStore() {
-    if (root.FIREBASE_CONFIG && root.firebase) {
+    if (root.FIREBASE_CONFIG) {
+      if (root.firebaseReady) await Promise.race([root.firebaseReady, sleep(20000)]);
+      if (!root.firebase || !root.firebase.firestore) return { kind: 'blocked', reason: 'firebase_not_loaded', me: { id: 'anon', name: '' } };
       try { return await createFirebaseStore(root.FIREBASE_CONFIG); }
       catch (e) { return { kind: 'blocked', reason: (e && (e.code || e.message)) || 'firebase', me: { id: 'anon', name: '' } }; }
     }

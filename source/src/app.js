@@ -719,7 +719,13 @@
     if (t <= 10 && !ts.warned && actorPid()) { ts.warned = true; beep(); }
     const over = (Date.now() - ts.at) / 1000;
     // The admin's phone enforces at 30s; any other phone steps in at 45s if the admin's phone is away.
-    if (!ts.fired && ((isAdmin() && over >= TURN_SECS) || over >= TURN_SECS + 15)) { ts.fired = true; run(() => timeoutTurn(ts.key, ts.p)); }
+    if (!ts.fired && ((isAdmin() && over >= TURN_SECS) || over >= TURN_SECS + 15)) {
+      ts.fired = true;
+      timeoutTurn(ts.key, ts.p).catch((e) => console.warn(e)).finally(() => {
+        // Still the same turn after trying? Fetch a fresh copy of the table and try again in 3 seconds.
+        if (S.turnSeen === ts) setTimeout(() => { pollTable(); if (S.turnSeen === ts) ts.fired = false; }, 3000);
+      });
+    }
   }, 1000);
   async function timeoutTurn(key, p) {
     const misses = ((S.session && S.session.misses) || {})[p] || 0;
@@ -734,7 +740,10 @@
         x.undo = null; x.lastActor = null;
         return x;
       });
-    } catch (e) { if (e.message === 'skip' || /changed/.test(e.message)) return; throw e; }
+    } catch (e) {
+      if (e.message === 'skip' || /changed/.test(e.message)) { await pollTable(); return; }
+      throw e;
+    }
     await mutateSession((s) => { s.misses = s.misses || {}; s.misses[p] = misses + 1; });
     toast('⏱ ' + nm(p) + ' ran out of time — ' + (did === 'check' ? 'auto-checked' : 'folded'));
   }
@@ -932,7 +941,8 @@
   function actionPanel(h) {
     const actor = actorPid();
     if (!actor) {
-      return `<div class="card small mute" style="text-align:center">Waiting for <b style="color:var(--ink)">${esc(nm(h.toAct))}</b>…</div>`;
+      return `<div class="card small mute" style="text-align:center">Waiting for <b style="color:var(--ink)">${esc(nm(h.toAct))}</b>…
+        ${isAdmin() ? `<button class="btn sm full" style="margin-top:8px" data-act="forceMove">⏱ Time's up — auto-move for ${esc(nm(h.toAct))}</button>` : ''}</div>`;
     }
     const o = E.options(h, actor);
     const key = h.no + ':' + h.v;
@@ -1303,6 +1313,12 @@
     const h = S.hand;
     switch (a) {
       case 'refresh': return run(hardRefresh);
+      case 'forceMove': return run(async () => {
+        await pollTable();
+        const h = S.hand; if (!h || h.status !== 'betting') return;
+        if (secsLeft() > 0) throw new Error('Their 30 seconds are not up yet');
+        await timeoutTurn(h.no + ':' + h.v + ':' + h.toAct, h.toAct);
+      });
       case 'mic': toggleMic(); return; // must run synchronously in the click
       case 'sound': soundOn = !soundOn; try { localStorage.setItem('poker-sound', soundOn ? 'on' : 'off'); } catch (e) {} toast(soundOn ? 'Turn alerts on 🔊' : 'Turn alerts muted (vibration only)'); if (soundOn) { unlockAudio(); beep(); } render(); return;
       case 'rec': return run(toggleRecord);
@@ -1393,7 +1409,8 @@
       $app.innerHTML = `<div class="top"><div class="brand">♠ Poker <b>Night</b></div></div><div class="wrap"><div class="card"><h3>Can't reach the table</h3>
         <p>This page couldn't connect to the shared game.</p>
         ${window.FIREBASE_CONFIG ? `<ol class="small" style="padding-left:18px;line-height:1.7"><li>Check your internet connection.</li><li>Open the link in Chrome or Safari, not inside WhatsApp or another app.</li><li>Close and open the link again.</li></ol>` : `<ol class="small" style="padding-left:18px;line-height:1.7"><li>Make sure you're signed in to Claude with the email the host invited.</li><li>Ask the host to check your access is <b>Editor</b>.</li><li>Open the link in Chrome or Safari, not inside another app.</li><li>Close and open the link again.</li></ol>`}
-        <div class="small mute">Code: ${esc(S.store.reason)}</div></div></div>`;
+        <div class="small mute">Code: ${esc(S.store.reason)}</div>
+        <button class="btn gold full" style="margin-top:12px" onclick="location.reload()">Try again</button></div></div>`;
       return;
     }
     setupDictation();
