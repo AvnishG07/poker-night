@@ -618,6 +618,7 @@
     S.secretSub = null; S.secret = null; S.myHole = null; holeFetch = null;
     if (!sid) { render(); return; }
     S.unsub.push(S.store.onDoc('sessions/' + sid, (d) => {
+      S.lastLive = Date.now();
       const wasPending = limitPendingForMe();
       S.session = d;
       if (d && S.announceNight === d.id) {
@@ -646,7 +647,8 @@
     S.unsub.push(S.store.onQuery('sessions/' + sid + '/hands', { orderBy: 'no', dir: 'desc', limit: 60 }, (rows) => { S.history = rows; render(); }, onErr));
     S.unsub.push(S.store.onQuery('sessions/' + sid + '/chat', { orderBy: 'ts', dir: 'desc', limit: 50 }, (rows) => { S.chat = rows.reverse(); render(); }, onErr));
   }
-  function onHand(d) {
+  function onHand(d, fromPoll) {
+      if (!fromPoll) S.lastLive = Date.now();
       if (d && d.status === 'betting' && d.toAct) {
         const key = d.no + ':' + d.v + ':' + d.toAct;
         if (!S.turnSeen || S.turnSeen.key !== key) S.turnSeen = { key, at: Date.now(), p: d.toAct, warned: false, fired: false };
@@ -672,7 +674,7 @@
       const d = await S.store.get(handPath());
       if (d && (!S.hand || d.no !== S.hand.no || d.v !== S.hand.v || d.status !== S.hand.status)) {
         S.stalls = (S.stalls || 0) + 1;
-        onHand(d);
+        onHand(d, true);
         if (S.stalls >= 2) { S.stalls = 0; resubscribe(); } // live updates stuck on this phone → reconnect
       } else S.stalls = 0;
     } catch (e) {}
@@ -694,6 +696,8 @@
   // in the background (no page reload, so nothing you're typing is lost).
   async function autoRefresh() {
     if (!S.sid || document.hidden || !S.store || S.store.kind !== 'firebase') return;
+    // Only when live updates have gone quiet on this phone — saves the free daily quota.
+    if (Date.now() - (S.lastLive || 0) < 20000 && !needMyHole()) return;
     try {
       const sd = await S.store.get(sessPath());
       if (sd && JSON.stringify(sd) !== JSON.stringify(S.session)) { S.session = sd; render(); }
@@ -767,7 +771,9 @@
     let body = '';
     const banners = [];
     if (S.store.kind === 'memory') banners.push(`<div class="banner info">Preview mode — data stays on this device only. Open the shared link signed in to play with friends.</div>`);
-    if (S.connErr) banners.push(`<div class="banner">Connection problem (${esc(S.connErr)}). Close the page and open the link again in a minute.</div>`);
+    if (S.connErr) banners.push(/resource|quota|exhausted/i.test(S.connErr)
+      ? `<div class="banner">The game's free daily limit on Firebase is used up. It resets at about 1:30 pm (India time). (${esc(S.connErr)})</div>`
+      : `<div class="banner">Connection problem (${esc(S.connErr)}). Close the page and open the link again in a minute.</div>`);
     if (S.store.canWrite === false) banners.push(`<div class="banner">You can watch but not play. Ask the host to invite you as an <b>Editor</b>.</div>`);
 
     if (!S.session || S.session.status === 'closed') body = lobbyView();
